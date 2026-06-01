@@ -1,0 +1,18 @@
+# Binaries and executables at root
+/hivemind
+
+# Antigravity CLI workspace state
+.antigravitycli/
+
+# Python cache and temporary files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
