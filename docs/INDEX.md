@@ -25,6 +25,7 @@ Detailed design documents, shims, and architectural integration notes for extern
 | Plugin | Path | Description | Integration Status |
 | :--- | :--- | :--- | :--- |
 | **Claude Code** | [CLAUDECODE.md](file:///Users/jacobmiller22/projects/hivemind/docs/plugins/CLAUDECODE.md) | Integration path via active lifecycle hooks and passive transcript discovery. | Planned / Conceptual |
+| **Antigravity** | [ANTIGRAVITY.md](file:///Users/jacobmiller22/projects/hivemind/docs/plugins/ANTIGRAVITY.md) | Integration path for Antigravity CLI via passive transcript discovery. | Planned / Conceptual |
 
 ---
 
