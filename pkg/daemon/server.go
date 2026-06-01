@@ -4,11 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -20,8 +17,6 @@ var conversationIDRegex = regexp.MustCompile(`(?i)"conversationId"\s*:\s*"([a-fA
 
 // Server implements the Hivemind state daemon.
 type Server struct {
-	SocketPath         string
-	SessionsDir        string
 	State              *StateTree
 	StateMu            sync.Mutex
 	Subscribers        map[chan []byte]bool
@@ -29,8 +24,6 @@ type Server struct {
 
 	// New Tool Adapter Fields
 	Adapters           []ToolAdapter
-	AntigravityDir     string // Configurable brain directory for Antigravity
-	FilePollInterval   time.Duration
 
 	// Configuration for cool-off windows
 	SubagentCoolOff time.Duration
@@ -41,10 +34,8 @@ type Server struct {
 }
 
 // NewServer initializes a new Server with default settings.
-func NewServer(socketPath, sessionsDir string) *Server {
+func NewServer() *Server {
 	return &Server{
-		SocketPath:         socketPath,
-		SessionsDir:        sessionsDir,
 		State: &StateTree{
 			Sessions: make(map[string]*SessionState),
 		},
@@ -52,20 +43,10 @@ func NewServer(socketPath, sessionsDir string) *Server {
 		SubagentCoolOff:  30 * time.Second,
 		SessionCoolOff:   30 * time.Second,
 		ListPanesFunc:    DefaultListPanes,
-		FilePollInterval: 1 * time.Second,
 	}
 }
 
-// ResolveSocketPath expands the home directory tilde if present.
-func ResolveSocketPath(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
-}
+
 
 // DefaultListPanes queries tmux for all active pane IDs.
 func DefaultListPanes() ([]string, error) {
@@ -86,26 +67,7 @@ func DefaultListPanes() ([]string, error) {
 	return panes, nil
 }
 
-// ListenUDS sets up the Unix Domain Socket listener.
-func ListenUDS(socketPath string) (net.Listener, string, error) {
-	resolvedPath := ResolveSocketPath(socketPath)
 
-	// Attempt to create the parent directories
-	dir := filepath.Dir(resolvedPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, "", err
-	}
-
-	// Remove existing socket file if it exists
-	_ = os.Remove(resolvedPath)
-
-	l, err := net.Listen("unix", resolvedPath)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return l, resolvedPath, nil
-}
 
 // Start runs the server's main UDS acceptance loop and the tmux polling ticker.
 func (s *Server) Start(ctx context.Context) error {
@@ -123,8 +85,8 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// handleConnection handles a single client or hook adapter connection.
-func (s *Server) handleConnection(conn net.Conn) {
+// HandleConnection handles a single client or hook adapter connection.
+func (s *Server) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 
@@ -393,173 +355,7 @@ func (s *Server) SyncTmuxAndPrune() {
 	}
 }
 
-// StartFilePoller runs the periodic JSON file session poller.
-func (s *Server) StartFilePoller(ctx context.Context, interval time.Duration) {
-	_ = os.MkdirAll(s.SessionsDir, 0755)
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.SyncFileSessions()
-		}
-	}
-}
-
-// SyncFileSessions reads JSON session files from SessionsDir and merges them into the state tree.
-func (s *Server) SyncFileSessions() {
-	entries, err := os.ReadDir(s.SessionsDir)
-	if err != nil {
-		return
-	}
-
-	now := time.Now()
-	seenIDs := make(map[string]bool)
-	stateChanged := false
-
-	type parsedSession struct {
-		key     string
-		fss     FileSessionState
-		modTime time.Time
-	}
-
-	var parsed []parsedSession
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		filePath := filepath.Join(s.SessionsDir, entry.Name())
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			continue
-		}
-
-		var fss FileSessionState
-		if err := json.Unmarshal(data, &fss); err != nil {
-			continue
-		}
-
-		fileInfo, err := entry.Info()
-		modTime := now
-		if err == nil {
-			modTime = fileInfo.ModTime()
-		}
-
-		key := "file:" + fss.SessionID
-		seenIDs[key] = true
-		parsed = append(parsed, parsedSession{key: key, fss: fss, modTime: modTime})
-	}
-
-	s.StateMu.Lock()
-	defer s.StateMu.Unlock()
-
-	for _, p := range parsed {
-		fss := p.fss
-		modTime := p.modTime
-		session, exists := s.State.Sessions[p.key]
-		if exists {
-			// Align subagents to avoid spurious mismatch of SpawnedAt / CompletedAt
-			for _, sa := range fss.Subagents {
-				if oldSa, ok := session.Subagents[sa.ID]; ok {
-					sa.SpawnedAt = oldSa.SpawnedAt
-					if sa.Status == oldSa.Status {
-						sa.CompletedAt = oldSa.CompletedAt
-					} else if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
-						if sa.CompletedAt == nil {
-							sa.CompletedAt = &modTime
-						}
-					}
-				} else {
-					sa.SpawnedAt = modTime
-					if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
-						sa.CompletedAt = &modTime
-					}
-				}
-			}
-
-			changed := session.Status != fss.Status ||
-				session.Model != fss.Model ||
-				session.Cwd != fss.Cwd ||
-				session.GitBranch != fss.GitBranch ||
-				session.TmuxPaneID != fss.TmuxPaneID ||
-				session.TmuxSession != fss.TmuxSession ||
-				session.TmuxWindow != fss.TmuxWindow ||
-				!subagentsEqual(session.Subagents, fss.Subagents) ||
-				session.LastActivity.Before(modTime)
-
-			if changed {
-				session.Status = fss.Status
-				session.Model = fss.Model
-				session.Cwd = fss.Cwd
-				session.GitBranch = fss.GitBranch
-				session.TmuxPaneID = fss.TmuxPaneID
-				session.TmuxSession = fss.TmuxSession
-				session.TmuxWindow = fss.TmuxWindow
-				session.Subagents = fss.Subagents
-				session.LastActivity = modTime
-				session.LastEventReceived = modTime
-				stateChanged = true
-			}
-		} else {
-			subagents := fss.Subagents
-			if subagents == nil {
-				subagents = make(map[string]*Subagent)
-			}
-			// Align subagents for new session
-			for _, sa := range subagents {
-				sa.SpawnedAt = modTime
-				if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
-					sa.CompletedAt = &modTime
-				}
-			}
-			s.State.Sessions[p.key] = &SessionState{
-				SessionID:         fss.SessionID,
-				TmuxPaneID:        fss.TmuxPaneID,
-				TmuxSession:       fss.TmuxSession,
-				TmuxWindow:        fss.TmuxWindow,
-				Cwd:               fss.Cwd,
-				GitBranch:         fss.GitBranch,
-				Model:             fss.Model,
-				Status:            fss.Status,
-				LastActivity:      modTime,
-				LastEventReceived: modTime,
-				Subagents:         subagents,
-			}
-			stateChanged = true
-		}
-	}
-
-	// Prune file-based sessions whose JSON file was deleted
-	for id, session := range s.State.Sessions {
-		if strings.HasPrefix(id, "file:") {
-			jsonPath := filepath.Join(s.SessionsDir, session.SessionID+".json")
-			logsDir := filepath.Join(s.AntigravityDir, session.SessionID, ".system_generated", "logs")
-			transcriptPath1 := filepath.Join(logsDir, "transcript.jsonl")
-			transcriptPath2 := filepath.Join(logsDir, "transcript_full.jsonl")
-
-			_, errJson := os.Stat(jsonPath)
-			_, errTrans1 := os.Stat(transcriptPath1)
-			_, errTrans2 := os.Stat(transcriptPath2)
-
-			jsonExists := errJson == nil
-			transExists := errTrans1 == nil || errTrans2 == nil
-
-			if !jsonExists && !transExists {
-				delete(s.State.Sessions, id)
-				stateChanged = true
-			}
-		}
-	}
-
-	if stateChanged {
-		s.broadcastStateLocked()
-	}
-}
 
 // broadcastStateLocked serializes and streams the updated StateTree to all open subscribers.
 func (s *Server) broadcastStateLocked() {
@@ -600,396 +396,21 @@ func (s *Server) Close() error {
 	return nil
 }
 
-// SyncAntigravitySessions scans s.AntigravityDir, parses transcript.jsonl files, and updates the state tree.
-func (s *Server) SyncAntigravitySessions() {
-	entries, err := os.ReadDir(s.AntigravityDir)
-	if err != nil {
-		return
-	}
 
-	now := time.Now()
-	seenIDs := make(map[string]bool)
-	stateChanged := false
 
-	type parsedSession struct {
-		key     string
-		fss     FileSessionState
-		modTime time.Time
-	}
-
-	var parsed []parsedSession
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		sessionID := entry.Name()
-		// Try to find transcript.jsonl or transcript_full.jsonl
-		logsDir := filepath.Join(s.AntigravityDir, sessionID, ".system_generated", "logs")
-		transcriptPath := filepath.Join(logsDir, "transcript.jsonl")
-		if _, err := os.Stat(transcriptPath); err != nil {
-			transcriptPath = filepath.Join(logsDir, "transcript_full.jsonl")
-			if _, err := os.Stat(transcriptPath); err != nil {
-				continue
-			}
-		}
-
-		info, err := os.Stat(transcriptPath)
-		modTime := now
-		if err == nil {
-			modTime = info.ModTime()
-		}
-
-		fss, err := s.parseTranscriptFile(transcriptPath, sessionID)
-		if err != nil {
-			continue
-		}
-
-		key := "file:" + sessionID
-		seenIDs[key] = true
-		parsed = append(parsed, parsedSession{key: key, fss: *fss, modTime: modTime})
-	}
-
+// BroadcastState serializes and streams the updated StateTree to all open subscribers.
+func (s *Server) BroadcastState() {
 	s.StateMu.Lock()
 	defer s.StateMu.Unlock()
-
-	for _, p := range parsed {
-		fss := p.fss
-		modTime := p.modTime
-		session, exists := s.State.Sessions[p.key]
-		if exists {
-			// Align subagents to avoid spurious mismatch of SpawnedAt / CompletedAt
-			for _, sa := range fss.Subagents {
-				if oldSa, ok := session.Subagents[sa.ID]; ok {
-					sa.SpawnedAt = oldSa.SpawnedAt
-					if sa.Status == oldSa.Status {
-						sa.CompletedAt = oldSa.CompletedAt
-					} else if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
-						if sa.CompletedAt == nil {
-							sa.CompletedAt = &modTime
-						}
-					}
-				} else {
-					sa.SpawnedAt = modTime
-					if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
-						sa.CompletedAt = &modTime
-					}
-				}
-			}
-
-			changed := session.Status != fss.Status ||
-				session.Model != fss.Model ||
-				session.Cwd != fss.Cwd ||
-				session.GitBranch != fss.GitBranch ||
-				session.TmuxPaneID != fss.TmuxPaneID ||
-				session.TmuxSession != fss.TmuxSession ||
-				session.TmuxWindow != fss.TmuxWindow ||
-				!subagentsEqual(session.Subagents, fss.Subagents) ||
-				session.LastActivity.Before(modTime)
-
-			if changed {
-				session.Status = fss.Status
-				session.Model = fss.Model
-				session.Cwd = fss.Cwd
-				session.GitBranch = fss.GitBranch
-				session.TmuxPaneID = fss.TmuxPaneID
-				session.TmuxSession = fss.TmuxSession
-				session.TmuxWindow = fss.TmuxWindow
-				session.Subagents = fss.Subagents
-				session.LastActivity = modTime
-				session.LastEventReceived = modTime
-				stateChanged = true
-			}
-		} else {
-			subagents := fss.Subagents
-			if subagents == nil {
-				subagents = make(map[string]*Subagent)
-			}
-			// Align subagents for new session
-			for _, sa := range subagents {
-				sa.SpawnedAt = modTime
-				if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
-					sa.CompletedAt = &modTime
-				}
-			}
-			s.State.Sessions[p.key] = &SessionState{
-				SessionID:         fss.SessionID,
-				TmuxPaneID:        fss.TmuxPaneID,
-				TmuxSession:       fss.TmuxSession,
-				TmuxWindow:        fss.TmuxWindow,
-				Cwd:               fss.Cwd,
-				GitBranch:         fss.GitBranch,
-				Model:             fss.Model,
-				Status:            fss.Status,
-				LastActivity:      modTime,
-				LastEventReceived: modTime,
-				Subagents:         subagents,
-			}
-			stateChanged = true
-		}
-	}
-
-	// Prune file-based sessions whose transcripts were deleted
-	for id, session := range s.State.Sessions {
-		if strings.HasPrefix(id, "file:") {
-			jsonPath := filepath.Join(s.SessionsDir, session.SessionID+".json")
-			logsDir := filepath.Join(s.AntigravityDir, session.SessionID, ".system_generated", "logs")
-			transcriptPath1 := filepath.Join(logsDir, "transcript.jsonl")
-			transcriptPath2 := filepath.Join(logsDir, "transcript_full.jsonl")
-
-			_, errJson := os.Stat(jsonPath)
-			_, errTrans1 := os.Stat(transcriptPath1)
-			_, errTrans2 := os.Stat(transcriptPath2)
-
-			jsonExists := errJson == nil
-			transExists := errTrans1 == nil || errTrans2 == nil
-
-			if !jsonExists && !transExists {
-				delete(s.State.Sessions, id)
-				stateChanged = true
-			}
-		}
-	}
-
-	if stateChanged {
-		s.broadcastStateLocked()
-	}
+	s.broadcastStateLocked()
 }
 
-// TranscriptLine represents a single parsed line of the transcript.jsonl file
-type TranscriptLine struct {
-	StepIndex int    `json:"step_index"`
-	Source    string `json:"source"`
-	Type      string `json:"type"`
-	Status    string `json:"status"`
-	Content   string `json:"content"`
-	ToolCalls []struct {
-		Name string          `json:"name"`
-		Args json.RawMessage `json:"args"`
-	} `json:"tool_calls"`
+// Emit injects an externally generated HivemindEvent into the state engine.
+func (s *Server) Emit(event *HivemindEvent) {
+	s.processEvent(event)
 }
 
-// parseTranscriptFile reads a transcript JSONL file and reconstructs the session state
-func (s *Server) parseTranscriptFile(path string, sessionID string) (*FileSessionState, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var lines []TranscriptLine
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		var line TranscriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
-			lines = append(lines, line)
-		}
-	}
-
-	if len(lines) == 0 {
-		return nil, fmt.Errorf("empty transcript")
-	}
-
-	// Default coordinates
-	fss := &FileSessionState{
-		SessionID:   sessionID,
-		TmuxPaneID:  "%0",
-		TmuxSession: "antigravity",
-		TmuxWindow:  "1",
-		Status:      StatusIdle,
-		Subagents:   make(map[string]*Subagent),
-	}
-
-	// Heuristics mapping tool calls by step index to track subagents completion
-	subagentsByStep := make(map[int][]string)
-
-	for _, line := range lines {
-		// Extract CWD from first user input
-		if line.Type == "USER_INPUT" && line.Content != "" {
-			if cwd := extractCwd(line.Content); cwd != "" {
-				fss.Cwd = cwd
-			}
-			if model := extractModel(line.Content); model != "" {
-				fss.Model = model
-			}
-		}
-
-		// Extract spawned subagents
-		if line.Type == "PLANNER_RESPONSE" && len(line.ToolCalls) > 0 {
-			for _, tc := range line.ToolCalls {
-				if tc.Name == "invoke_subagent" {
-					type SubagentArg struct {
-						Role     string `json:"Role"`
-						TypeName string `json:"TypeName"`
-					}
-					var sas []SubagentArg
-
-					// 1. Try to unmarshal as direct struct first (raw JSON array)
-					var args struct {
-						Subagents []SubagentArg `json:"Subagents"`
-					}
-					if err := json.Unmarshal(tc.Args, &args); err == nil && len(args.Subagents) > 0 {
-						sas = args.Subagents
-					} else {
-						// 2. Try to unmarshal tc.Args as a string representing the entire JSON object, or directly as an object
-						var argsStr string
-						var parsedObj map[string]json.RawMessage
-						if json.Unmarshal(tc.Args, &argsStr) == nil {
-							_ = json.Unmarshal([]byte(argsStr), &parsedObj)
-						} else {
-							_ = json.Unmarshal(tc.Args, &parsedObj)
-						}
-
-						if parsedObj != nil {
-							if subagentsRaw, ok := parsedObj["Subagents"]; ok {
-								// 3. Try to unmarshal the raw field as an array
-								if err := json.Unmarshal(subagentsRaw, &sas); err != nil {
-									// 4. Try to unmarshal the raw field as a string containing the array
-									var subagentsStr string
-									if json.Unmarshal(subagentsRaw, &subagentsStr) == nil {
-										_ = json.Unmarshal([]byte(subagentsStr), &sas)
-									}
-								}
-							}
-						}
-					}
-
-					for idx, sa := range sas {
-						saID := fmt.Sprintf("sub_%d_%d", line.StepIndex, idx)
-						subagentsByStep[line.StepIndex] = append(subagentsByStep[line.StepIndex], saID)
-						fss.Subagents[saID] = &Subagent{
-							ID:        saID,
-							Role:      sa.Role,
-							TypeName:  sa.TypeName,
-							Status:    SubagentRunning,
-							SpawnedAt: time.Now(),
-						}
-					}
-				}
-			}
-		}
-
-		// Mark subagents as completed when the INVOKE_SUBAGENT tool execution returns
-		if line.Type == "INVOKE_SUBAGENT" && line.Status == "DONE" {
-			// Extract conversationId (child UUID) if present
-			var childUUID string
-			matches := conversationIDRegex.FindStringSubmatch(line.Content)
-			if len(matches) > 1 {
-				childUUID = matches[1]
-			}
-
-			// Find the temporary subagent ID that corresponds to this tool execution.
-			// The tool call was at some step S < line.StepIndex. We look for the most recent
-			// subagent with ID format "sub_S_idx".
-			var targetTempID string
-			maxStep := -1
-			for saID := range fss.Subagents {
-				if strings.HasPrefix(saID, "sub_") {
-					var s, idx int
-					if _, err := fmt.Sscanf(saID, "sub_%d_%d", &s, &idx); err == nil {
-						if s < line.StepIndex && s > maxStep {
-							maxStep = s
-							targetTempID = saID
-						}
-					}
-				}
-			}
-
-			if targetTempID != "" {
-				sa := fss.Subagents[targetTempID]
-				// If we extracted a real child UUID, we link/rename it!
-				if childUUID != "" {
-					delete(fss.Subagents, targetTempID)
-					sa.ID = childUUID
-					fss.Subagents[childUUID] = sa
-				}
-				
-				// Mark as completed since the tool returned DONE
-				sa.Status = SubagentCompleted
-				completedAt := time.Now()
-				sa.CompletedAt = &completedAt
-			} else {
-				// Fallback: if no temporary subagent was found, but we have a childUUID,
-				// still ensure we have it registered as completed
-				if childUUID != "" {
-					if sa, exists := fss.Subagents[childUUID]; exists {
-						sa.Status = SubagentCompleted
-						completedAt := time.Now()
-						sa.CompletedAt = &completedAt
-					}
-				}
-			}
-		}
-	}
-
-	// Apply status heuristic to the very last line
-	lastLine := lines[len(lines)-1]
-	switch lastLine.Type {
-	case "USER_INPUT":
-		fss.Status = StatusThinking
-	case "PLANNER_RESPONSE":
-		if lastLine.Status != "DONE" {
-			fss.Status = StatusThinking
-		} else {
-			if len(lastLine.ToolCalls) > 0 {
-				tc := lastLine.ToolCalls[0]
-				switch tc.Name {
-				case "ask_permission":
-					fss.Status = StatusAwaitingPermission
-				case "ask_question":
-					fss.Status = StatusAwaitingInput
-				default:
-					fss.Status = StatusToolRunning
-				}
-			} else {
-				fss.Status = StatusIdle
-			}
-		}
-	default:
-		// Tool execution steps
-		if lastLine.Status != "DONE" {
-			fss.Status = StatusToolRunning
-		} else {
-			fss.Status = StatusThinking // Tool just outputted; model about to plan/think
-		}
-	}
-
-	return fss, nil
-}
-
-// extractCwd pulls Cwd path from <user_information> block in the transcript content
-func extractCwd(content string) string {
-	lines := strings.Split(content, "\n")
-	for _, l := range lines {
-		if strings.Contains(l, "->") {
-			parts := strings.Split(l, "->")
-			if len(parts) > 0 {
-				trimmed := strings.TrimSpace(parts[0])
-				if strings.HasPrefix(trimmed, "/") {
-					return trimmed
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// extractModel parses the Model Selection setting change in transcript content
-func extractModel(content string) string {
-	if idx := strings.Index(content, "Model Selection"); idx != -1 {
-		sub := content[idx:]
-		if toIdx := strings.Index(sub, "to "); toIdx != -1 {
-			modelSub := sub[toIdx+3:]
-			if endIdx := strings.IndexAny(modelSub, "\n.)"); endIdx != -1 {
-				return strings.TrimSpace(modelSub[:endIdx])
-			}
-			return strings.TrimSpace(modelSub)
-		}
-	}
-	return ""
-}
-
-func subagentsEqual(a, b map[string]*Subagent) bool {
+func SubagentsEqual(a, b map[string]*Subagent) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -1013,4 +434,5 @@ func subagentsEqual(a, b map[string]*Subagent) bool {
 	}
 	return true
 }
+
 

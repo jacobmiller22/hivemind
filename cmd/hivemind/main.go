@@ -16,6 +16,7 @@ import (
 	"github.com/jacobmiller22/hivemind"
 	"github.com/jacobmiller22/hivemind/pkg/client"
 	"github.com/jacobmiller22/hivemind/pkg/daemon"
+	"github.com/jacobmiller22/hivemind/pkg/daemon/adapters"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -77,11 +78,11 @@ func runDaemon(customUdsPath, enabledTools, customAntigravityDir, customSessions
 		antigravityDir = client.ResolvePath(antigravityDir)
 	}
 
-	s := daemon.NewServer(socketPath, sessionsDir)
-	s.AntigravityDir = antigravityDir
+	s := daemon.NewServer()
 
+	pollInterval := 1 * time.Second
 	if pollDur, err := time.ParseDuration(filePoll); err == nil {
-		s.FilePollInterval = pollDur
+		pollInterval = pollDur
 	}
 
 	// Register adapters according to enabledTools config
@@ -95,19 +96,19 @@ func runDaemon(customUdsPath, enabledTools, customAntigravityDir, customSessions
 		tool = strings.TrimSpace(tool)
 		if tool == "uds" || allMode {
 			if !addedTools["uds"] {
-				s.Adapters = append(s.Adapters, &daemon.GenericUDSAdapter{})
+				s.Adapters = append(s.Adapters, adapters.NewGenericUDSAdapter(socketPath))
 				addedTools["uds"] = true
 			}
 		}
 		if tool == "mock-file" || allMode {
 			if !addedTools["mock-file"] {
-				s.Adapters = append(s.Adapters, &daemon.MockFileAdapter{})
+				s.Adapters = append(s.Adapters, adapters.NewMockFileAdapter(sessionsDir, pollInterval))
 				addedTools["mock-file"] = true
 			}
 		}
 		if tool == "antigravity" || allMode {
 			if !addedTools["antigravity"] {
-				s.Adapters = append(s.Adapters, &daemon.AntigravityAdapter{})
+				s.Adapters = append(s.Adapters, adapters.NewAntigravityAdapter(antigravityDir, pollInterval))
 				addedTools["antigravity"] = true
 			}
 		}
