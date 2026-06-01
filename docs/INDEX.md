@@ -20,13 +20,16 @@ The following documents define the various phases and aspects of the project. De
 
 ---
 
-## 2. Architecture & Design Decisions
+## 2. Architecture & Design Decisions Workflow
 
-To keep the client-daemon-adapter system robust and extensible, we adhere to the following workflow for architecture decisions:
+To maintain a clean and maintainable codebase, we adhere to a formal "Design First" process.
 
-1. **Design First**: No non-trivial architectural changes (such as database migrations, socket protocol changes, or new CLI modes) should be implemented without first updating [DESIGN.md](file:///Users/jacobmiller22/projects/hivemind/docs/DESIGN.md).
-2. **Backward & Forward Compatibility**: Ensure that telemetry schema modifications are additive and do not break older client/daemon versions. Keep the UDS channel fully bidirectional for MVP2 compatibility.
-3. **Graceful Failures**: Telemetry adapters must never crash the parent agent execution. State persistence, connection pooling, and pruning timeouts must be clearly documented.
+> [!WARNING]
+> **No Design Leakage in Index**: This index (`INDEX.md`) must not reference or document specific architectural, database, interface, or protocol design details. Because design decisions are subject to frequent change as the codebase evolves, all such technical details belong strictly in [DESIGN.md](file:///Users/jacobmiller22/projects/hivemind/docs/DESIGN.md).
+
+### Design Change Process
+1. **Design First**: No non-trivial architectural changes should be implemented in code without first proposing and documenting them in [DESIGN.md](file:///Users/jacobmiller22/projects/hivemind/docs/DESIGN.md).
+2. **Review & Reconcile**: Once design changes are agreed upon, all implementation work must align fully with the updated specifications in the design document.
 
 ---
 
@@ -40,8 +43,7 @@ To maintain a premium, highly professional documentation standard that matches t
 * **Mermaid Example**:
   ```mermaid
   graph LR
-      Client[TUI Client] <-->|Bidirectional UDS| Daemon[hivemindd]
-      Adapter[Hook Adapter] -->|Unidirectional Events| Daemon
+      A[Component A] -->|Message/Event| B[Component B]
   ```
 
 ### 3.2. GitHub-Style Alerts
