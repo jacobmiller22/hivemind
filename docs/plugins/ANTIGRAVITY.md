@@ -9,46 +9,66 @@ This document explores the architectural design, compatibility, and integration 
 
 ## 1. Architectural Compatibility Summary
 
-The Antigravity product suite comprises three distinct products. Because each product operates on a different runtime environment and interface paradigm, their compatibility with `hivemind` varies significantly. 
-
-> [!WARNING]
-> **Product Compatibility Restriction**: As of the current version, the **Antigravity 2.0 Agent Manager** and **Antigravity IDE** are **not compatible** with the Hivemind state daemon. There are currently no plans to integrate them into the Hivemind ecosystem. Integration effort is exclusively focused on the terminal-native **Antigravity CLI**.
+The Antigravity product suite comprises three distinct products. Because each product operates on a different runtime environment and interface paradigm, their compatibility with `hivemind` varies. 
 
 ### Compatibility & Integration Matrix
 
 | Product | Architecture Paradigm | Active Telemetry (Push) | Passive Telemetry (Pull/Logs) | Integration Strategy |
 | :--- | :--- | :--- | :--- | :--- |
 | **Antigravity CLI** | Terminal-native AI coding agent | **Unsupported / Unknown** (No middleware/hook hooks exposed) | **Fully Supported** (Watching local transcript session files) | Active monitoring via log discovery and tailing of local session databases. |
-| **Antigravity 2.0 Agent Manager** | GUI dashboard & orchestrator | **Not Compatible** | **Not Compatible** | **No Integration Planned** |
+| **Antigravity 2.0 Agent Manager** | GUI dashboard & orchestrator | **Fully Supported** (Process-based `hooks.json` configs) | **Supported** (Tailing local session transcript files) | Active push-based telemetry using a non-blocking UDS-forwarder script. |
 | **Antigravity IDE** | Desktop IDE integration environment | **Not Compatible** | **Not Compatible** | **No Integration Planned** |
 
 ---
 
-## 2. Active Telemetry: Push-Based Hooks
+## 2. Active Telemetry: Push-Based Hooks (Antigravity 2.0)
 
-Unlike Claude Code, which provides a native hooks middleware system (`~/.claude/settings.json`), **Antigravity CLI** currently does **not** expose public, configurable execution hooks or interceptors that run external scripts during its lifecycle. 
+Antigravity 2.0 supports process-based hooks that execute local shell commands or scripts during its execution loop. Hooks are configured in a `hooks.json` file placed in the `.agents/` customization folder in the active workspace. These hooks communicate via JSON payload over standard input (stdin) and receive gating/action decisions over standard output (stdout).
 
-Consequently, push-based active telemetry is **unsupported** or **unknown** for Antigravity CLI at this time.
+### 2.1. Telemetry Hook Flow
+
+A lightweight non-blocking telemetry adapter script can intercept these events, forward the normalized state payload to the `hivemindd` UNIX domain socket, and immediately release control back to the agent process:
 
 ```mermaid
 graph TD
-    subgraph Antigravity CLI Process
-        A[User Input] --> B[Model Planning]
-        B --> C[Tool Execution]
-        C --> D[Model Response]
+    subgraph Antigravity 2.0 Process
+        A[User Input] -->|PreInvocation| B[Model Planning]
+        B -->|PreToolUse| C[Tool Execution]
+        C -->|PostToolUse| D[Model Response]
+        D -->|Stop| E[End Loop]
+    end
+    
+    subgraph Custom Workspace Hooks
+        H["Workspace Hook (.agents/hooks.json)"]
+    end
+    
+    subgraph Telemetry Shim
+        S["antigravity_debug_hook.py"]
     end
     
     subgraph hivemindd Ingest
-        E[UDS Socket Receiver]
+        HD["UDS Socket Receiver (~/.config/hivemind/hivemind.sock)"]
     end
 
-    B -.->|No execution hooks| E
-    C -.->|No middleware intercepts| E
-    
-    style B fill:#555,stroke:#333,stroke-dasharray: 5 5
-    style C fill:#555,stroke:#333,stroke-dasharray: 5 5
-    style E fill:#8b2635,stroke:#5c1d24
+    B -.->|Executes hook| H
+    C -.->|Executes hook| H
+    D -.->|Executes hook| H
+    E -.->|Executes hook| H
+    H ==>|Pipes stdin payload| S
+    S ==>|Non-blocking UDS Write| HD
+    S -.->|Returns stdout response| H
 ```
+
+### 2.2. Event Mapping Schema
+
+Based on active telemetry recorded in `/tmp/antigravity_hook_debug.log`, the following hook events map directly to Hivemind session states:
+
+| Hook Event | Trigger Point | Stdin Payload Excerpt | Derived State Transition |
+| :--- | :--- | :--- | :--- |
+| **`PreInvocation`** | Before calling the model. | `{"invocationNum": 3, "initialNumSteps": 10, "conversationId": "..."}` | Transition session status to `thinking`. |
+| **`PreToolUse`** | Before executing a tool. | `{"toolCall": {"name": "run_command", "args": {...}}, "stepIdx": 19, "conversationId": "..."}` | Transition status to `tool-running`. Map tool call name & args to the event payload. (Transition to `awaiting-permission` if `name` is `ask_permission`). |
+| **`PostToolUse`** | After a tool call completes. | `{"stepIdx": 5, "error": "exit status 1", "conversationId": "..."}` | Transition to `thinking` (or `errored` if `error` is present). |
+| **`Stop`** | When the execution loop terminates. | `{"terminationReason": "model_stop", "fullyIdle": true, "conversationId": "..."}` | Transition status to `idle` (or `session_stopped` if `fullyIdle` is `true`). |
 
 ---
 
