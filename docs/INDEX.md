@@ -46,13 +46,6 @@ To maintain a premium, highly professional documentation standard that matches t
       A[Component A] -->|Message/Event| B[Component B]
   ```
 
-### 3.2. GitHub-Style Alerts
-Use alerts strategically to highlight vital context, requirements, or cautions. Do not nest alerts or use them consecutively.
-* `> [!NOTE]` — For helpful background or non-blocking implementation details.
-* `> [!TIP]` — For performance optimizations, best practices, and developer efficiency.
-* `> [!IMPORTANT]` — For essential rules, compliance, and core architectural constraints.
-* `> [!WARNING]` — For potential breaking changes, compatibility warnings, or pitfalls.
-
 ---
 
 ## 4. Code & Documentation Alignment Workflow
