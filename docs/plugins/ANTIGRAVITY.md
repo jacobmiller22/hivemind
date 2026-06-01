@@ -16,7 +16,7 @@ The Antigravity product suite comprises three distinct products. Because each pr
 | Product | Architecture Paradigm | Active Telemetry (Push) | Passive Telemetry (Pull/Logs) | Integration Strategy |
 | :--- | :--- | :--- | :--- | :--- |
 | **Antigravity CLI** | Terminal-native AI coding agent | **Unsupported / Unknown** (No middleware/hook hooks exposed) | **Fully Supported** (Watching local transcript session files) | Active monitoring via log discovery and tailing of local session databases. |
-| **Antigravity 2.0 Agent Manager** | GUI dashboard & orchestrator | **Fully Supported** (Process-based `hooks.json` configs) | **Supported** (Tailing local session transcript files) | Active push-based telemetry using a non-blocking UDS-forwarder script. |
+| **Antigravity 2.0 Agent Manager** | GUI dashboard & orchestrator | **Fully Supported** (Process-based `hooks.json` configs) | **Supported** (Tailing local session transcript files) | Active push-based telemetry forwarding events using the `hivemind` binary hook command. |
 | **Antigravity IDE** | Desktop IDE integration environment | **Not Compatible** | **Not Compatible** | **No Integration Planned** |
 
 ---
@@ -27,7 +27,7 @@ Antigravity 2.0 supports process-based hooks that execute local shell commands o
 
 ### 2.1. Telemetry Hook Flow
 
-A lightweight non-blocking telemetry adapter script can intercept these events, forward the normalized state payload to the `hivemindd` UNIX domain socket, and immediately release control back to the agent process:
+The compiled Go binary `hivemind` acts directly as the hook executable (using the subcommand `hivemind hook <event>`). It intercepts these events, forwards the normalized state payload to the `hivemindd` UNIX domain socket, and immediately releases control back to the agent process:
 
 ```mermaid
 graph TD
@@ -42,8 +42,8 @@ graph TD
         H["Workspace Hook (.agents/hooks.json)"]
     end
     
-    subgraph Telemetry Shim
-        S["antigravity_debug_hook.py"]
+    subgraph Telemetry Hook
+        S["hivemind hook <event>"]
     end
     
     subgraph hivemindd Ingest
