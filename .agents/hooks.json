@@ -5,7 +5,7 @@
         "matcher": "*",
         "hooks": [
           {
-            "command": "python3 /Users/jacobmiller22/projects/hivemind/src/hooks/antigravity_debug_hook.py PreToolUse"
+            "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PreToolUse"
           }
         ]
       }
@@ -15,24 +15,24 @@
         "matcher": "*",
         "hooks": [
           {
-            "command": "python3 /Users/jacobmiller22/projects/hivemind/src/hooks/antigravity_debug_hook.py PostToolUse"
+            "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PostToolUse"
           }
         ]
       }
     ],
     "PreInvocation": [
       {
-        "command": "python3 /Users/jacobmiller22/projects/hivemind/src/hooks/antigravity_debug_hook.py PreInvocation"
+        "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PreInvocation"
       }
     ],
     "PostInvocation": [
       {
-        "command": "python3 /Users/jacobmiller22/projects/hivemind/src/hooks/antigravity_debug_hook.py PostInvocation"
+        "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PostInvocation"
       }
     ],
     "Stop": [
       {
-        "command": "python3 /Users/jacobmiller22/projects/hivemind/src/hooks/antigravity_debug_hook.py Stop"
+        "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook Stop"
       }
     ]
   }
