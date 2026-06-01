@@ -221,18 +221,16 @@ func (m *Model) renderHeader(width int) string {
 	runningAgents := 0
 	subagentsActive := 0
 
-	for _, tSession := range m.State.TmuxSessions {
-		for _, session := range tSession.Sessions {
-			totalSessions++
-			if session.Status == "awaiting-permission" {
-				blockedSessions++
-			} else if session.Status == "thinking" || session.Status == "tool-running" {
-				runningAgents++
-			}
-			for _, sa := range session.Subagents {
-				if sa.Status == "running" {
-					subagentsActive++
-				}
+	for _, session := range m.State.Sessions {
+		totalSessions++
+		if session.Status == "awaiting-permission" {
+			blockedSessions++
+		} else if session.Status == "thinking" || session.Status == "tool-running" {
+			runningAgents++
+		}
+		for _, sa := range session.Subagents {
+			if sa.Status == "running" {
+				subagentsActive++
 			}
 		}
 	}
@@ -282,8 +280,6 @@ func (m *Model) renderTree(maxLines int) string {
 		
 		var line string
 		switch node.Type {
-		case NodeTypeTmuxSession:
-			line = m.renderTmuxSessionNode(node)
 		case NodeTypeAgentSession:
 			line = m.renderAgentSessionNode(node)
 		case NodeTypeSubagent:
@@ -304,46 +300,11 @@ func (m *Model) renderTree(maxLines int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderTmuxSessionNode renders a top-level tmux session row
-func (m *Model) renderTmuxSessionNode(node *FlattenedNode) string {
-	arrow := "▸ "
-	if node.Expanded {
-		arrow = "▾ "
-	}
-	
-	folderIcon := "󰚗 " // Tmux session symbol / host
-	label := tmuxNodeStyle.Render(node.Label)
-	countText := mutedStyle.Render(fmt.Sprintf(" (%d active agents)", len(m.State.TmuxSessions[node.Label].Sessions)))
 
-	return arrow + folderIcon + label + countText
-}
-
-// renderAgentSessionNode renders a parent agent session row
 func (m *Model) renderAgentSessionNode(node *FlattenedNode) string {
 	s := node.AgentSession
 	if s == nil {
 		return node.Label
-	}
-
-	// Dynamic Guide characters
-	guideColor := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorBranchGuide))
-	branchGuide := guideColor.Render("├── ")
-	
-	// Let's see if this is the last agent in the tmux session (this is a nice detail!)
-	parentSession := m.State.TmuxSessions[node.TmuxSessionName]
-	if parentSession != nil {
-		lastSessionID := ""
-		// Sort keys to match rebuildTree
-		var keys []string
-		for k := range parentSession.Sessions {
-			keys = append(keys, k)
-		}
-		if len(keys) > 0 {
-			lastSessionID = keys[len(keys)-1] // very simple check, let's keep it robust
-		}
-		if s.SessionID == lastSessionID && !node.Expanded {
-			branchGuide = guideColor.Render("└── ")
-		}
 	}
 
 	arrow := "▸ "
@@ -370,10 +331,9 @@ func (m *Model) renderAgentSessionNode(node *FlattenedNode) string {
 	// Status Badge
 	badge := m.getStatusBadge(s.Status)
 
-	return branchGuide + arrow + tmuxCoords + cwdText + branchText + "  " + badge
+	return arrow + tmuxCoords + cwdText + branchText + "  " + badge
 }
 
-// renderSubagentNode renders a child subagent session row
 func (m *Model) renderSubagentNode(node *FlattenedNode) string {
 	sa := node.Subagent
 	if sa == nil {
@@ -381,8 +341,8 @@ func (m *Model) renderSubagentNode(node *FlattenedNode) string {
 	}
 
 	guideColor := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorBranchGuide))
-	// Deep guides
-	guides := guideColor.Render("│   └── ")
+	// Deep guides - parent is depth 0, child is depth 1
+	guides := guideColor.Render("└── ")
 
 	// Render status indicator
 	statusColor := ColorSlate
@@ -419,14 +379,6 @@ func (m *Model) renderInspector(width int, height int) string {
 	content = append(content, inspectorTitleStyle.Render("DETAILS INSPECTOR"))
 
 	switch node.Type {
-	case NodeTypeTmuxSession:
-		content = append(content, fmt.Sprintf("Type:   %s", tmuxNodeStyle.Render("Tmux Session")))
-		content = append(content, fmt.Sprintf("Name:   %s", node.Label))
-		
-		sessions := m.State.TmuxSessions[node.Label]
-		if sessions != nil {
-			content = append(content, fmt.Sprintf("Agents: %d registered", len(sessions.Sessions)))
-		}
 
 	case NodeTypeAgentSession:
 		s := node.AgentSession
@@ -443,7 +395,7 @@ func (m *Model) renderInspector(width int, height int) string {
 		}
 		content = append(content, fmt.Sprintf("Status:   %s", m.getStatusBadge(s.Status)))
 		
-		lastSeen := time.Since(s.LastEventTimestamp)
+		lastSeen := time.Since(s.LastActivity)
 		content = append(content, fmt.Sprintf("Last Act: %s ago", formatDuration(lastSeen)))
 		content = append(content, fmt.Sprintf("Children: %d subagents", len(s.Subagents)))
 

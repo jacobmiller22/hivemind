@@ -1,341 +1,144 @@
 # `hivemind` - Architecture & Technical Design Document
 
-This document outlines the system architecture, component design, data schemas, and communication protocols for **hivemind**, a tmux-native TUI dashboard. 
+This document outlines the system architecture, component design, data schemas, and communication protocols for **hivemind**, a terminal-native TUI dashboard for monitoring AI agent swarms.
 
 > [!NOTE]
-> **Telemetry adapters are structured as plugins** to make the state daemon (`hivemindd`) generic and compatible with multiple developer tools. While MVP1 focuses primarily on the native Python Hook Adapter (`hivemind_hooks`) for the Google Antigravity (AGY) CLI, the pluggable architecture ensures seamless compatibility with other tools (such as Claude Code shims or other custom wrappers) in MVP2.
+> **Telemetry adapters are structured as pluggable, tool-agnostic extensions** to make the state daemon (`hivemindd`) generic and compatible with multiple developer tools. While reference implementations are provided for specific developer tool clients, the pluggable, protocol-agnostic architecture ensures seamless compatibility with any arbitrary agent wrapper.
+>
+> **Language Standard**: To ensure performance, clean multi-transport compilation, and seamless concurrency management, all telemetry adapter plugins and daemon extensions **MUST be implemented in Golang**, unless bound by specific client runtime constraints (such as SDK client hooks in other languages).
 
 ---
 
 ## 1. Architectural Overview
 
-`hivemind` adopts a **client-daemon-adapter** architecture to ensure that state persists independently of any dashboard clients, multiple clients remain perfectly in sync, and telemetry ingestion remains decoupled from the UI.
+`hivemind` adopts a decoupled **client-daemon-adapter** architecture to ensure that agent state persists independently of any dashboard clients, multiple UI panels remain perfectly in sync, and telemetry ingestion remains decoupled from rendering.
 
 ### Component Diagram
 
 ```mermaid
 graph TD
-    %% Telemetry Sources
-    subgraph "Active Terminals (tmux Panes)"
-        subgraph "Pane A (Parent Session)"
-            AG1["Antigravity CLI (Parent)"] -->|"Imports"| HHK1["hivemind_hooks (Python)"]
+    %% External AI Agent Tooling Layer
+    subgraph "External AI Agent Tooling"
+        subgraph "Active Telemetry (Push)"
+            Session["Active AI Session (Live Process)"] -->|"Executes"| Hook["Tool-Specific Hook / Adapter"]
         end
-        subgraph "Pane B (Sub-agent)"
-            AG2["Antigravity CLI (Sub-agent)"] -->|"Imports"| HHK2["hivemind_hooks (Python)"]
+        subgraph "Passive Telemetry (Pull)"
+            Logs["Log Files / Transcripts on Disk"]
         end
     end
 
     %% State Daemon
-    subgraph "Background Services"
-        HD["hivemindd (State Daemon)"]
-        DB[(In-Memory State / SQLite)]
-        Poller["tmux CLI Poller"]
+    subgraph "State Daemon (hivemindd)"
+        HD["Daemon Ingestion Server"]
+        DB[(Flat Session State Database)]
+        HD --- DB
     end
 
-    %% TUI Clients
-    subgraph "Dashboard Clients (Any tmux Pane)"
-        TUI1["hivemind TUI (Client 1)"]
-        TUI2["hivemind TUI (Client 2)"]
+    %% Dashboard Clients
+    subgraph "TUI Client (hivemind)"
+        TUI["Dashboard Subscriber"] -->|"Computes Projection"| Tree["TUI Hierarchical Tree View"]
     end
 
-    %% Communications
-    HHK1 -->|"UDS (IPC) / JSON events"| HD
-    HHK2 -->|"UDS (IPC) / JSON events"| HD
-    
-    Poller -->|"tmux list-panes"| HD
-    HD <-->|"State & Commands (UDS)"| TUI1
-    HD <-->|"State & Commands (UDS)"| TUI2
-    HD --- DB
-
-    %% Interactions
-    TUI1 -->|"Jump Command"| TMUX["tmux CLI"]
-    Poller -.->|"Scrapes tmux for active/inactive panes"| AG1
+    %% Data Flow
+    Hook ==>|"Pushes Live Event Stream"| HD
+    Logs -.->|"Discovers & Tails Logs"| HD
+    HD <-->|"Streams Unified State"| TUI
 ```
 
-### Component Breakdown
+### Discovery & Telemetry Mechanisms
 
-1. **State Daemon (`hivemindd`)**:
-   - Runs as a lightweight, single-instance background daemon per machine.
-   - Listens on a Unix Domain Socket (UDS) for incoming connections from both Hook Adapters (writing events) and TUI Clients (subscribing to state and writing commands).
-   - Merges active telemetry events with periodic polling of `tmux` to detect exits, pane switches, and unmonitored sessions.
+The daemon utilizes two primary architectural mechanisms to discover running AI coding sessions and know exactly what is going on inside them:
 
-2. **Telemetry Hook Adapters (Plugins)**:
-   - Structured as pluggable, tool-specific modules (e.g., the Python Hook Adapter `hivemind_hooks.py` for the Antigravity CLI, or future shims/wrappers for tools like Claude Code).
-   - Any agent, wrapper, or developer tool can implement a telemetry plugin that communicates JSON lifecycle events to `hivemindd` via the standard Unix Domain Socket (UDS) protocol, ensuring compatibility with multiple platforms.
-   - Designed to **fail silently and gracefully** (zero exceptions propagated) if the daemon or socket is unavailable, preserving 100% agent execution safety.
+1. **Active Telemetry (Push-Based Hooks)**:
+   * **Session Discovery**: When a developer initiates an AI session in any terminal pane, a tool-specific lifecycle hook executes. This hook establishes a communication channel to the daemon and transmits a `session_started` lifecycle event. The channel may be configured as a persistent stream or run as a series of short-lived socket connections, depending on the tool's environment and runtime constraints.
+   * **State Tracking**: As the agent works, the hook pushes real-time telemetry packets (e.g. status changes, tool calls, and sub-agent spawns) to the daemon. The daemon tracks session activity using either the persistence of the live connection or event-driven inactivity timeouts (cooldowns) for short-lived connections.
 
-3. **TUI Dashboard Client (`hivemind`)**:
-   - A keyboard-driven TUI that connects to the Daemon's UDS.
-   - Receives the aggregated state tree and renders it in real-time.
-   - Auto-spawns the Daemon in the background if it is not currently running.
+
+2. **Passive Telemetry (Pull-Based Log Discovery & Tailing)**:
+   * **Session Discovery**: The daemon periodically scans designated runtime or configurations folders on disk to discover active agent transcripts or session state files.
+   * **State Tracking**: Upon discovering a log file, the daemon tails and parses its contents to reconstruct the session's turn-by-turn history. It maps the session's active/inactive lifecycle directly to the filesystem's last-modified timestamps.
 
 ---
 
-## 2. Telemetry Event & State Schema
+## 2. Telemetry Event & State Representation
 
-### 2.1. Telemetry Event Schema (Hook -> Daemon)
-Every lifecycle hook publishes JSON messages conforming to this schema over the UDS:
+### 2.1. Telemetry Event Representation (Adapter -> Daemon)
+Every telemetry adapter publishes standard event payloads over the communication channel conforming to this JSON structure:
 
-```typescript
-export interface HivemindEvent {
-  eventId: string;
-  sessionId: string;      // Unique Conversation ID for the Antigravity session
-  timestamp: string;      // RFC3339 format
-  eventType: 'session_started' | 'status_changed' | 'subagent_spawned' | 'subagent_status_changed' | 'session_stopped';
-  
-  context: {
-    tmuxPaneId: string;   // e.g. "%12"
-    tmuxSession: string;  // e.g. "hivemind"
-    tmuxWindow: string;   // e.g. "1"
-    cwd: string;          // Full path of working directory
-    gitBranch?: string;   // Active git branch if applicable
-  };
-
-  payload: {
-    status?: DerivedStatus;
-    model?: string;       // e.g. "Gemini 3.5 Flash"
-    
-    // Sub-agent specific fields
-    subagent?: {
-      id: string;
-      role: string;
-      typeName: string;
-      status: 'running' | 'completed' | 'errored';
-    };
-
-    // Event-specific metadata
-    metadata?: Record<string, any>;
-  };
+```json
+{
+  "eventId": "evt_ab48f29e",
+  "sessionId": "8d0f3530-e791-48f9-b2c0-eac6af12ed12",
+  "timestamp": "2026-06-01T14:41:28Z",
+  "eventType": "status_changed",
+  "context": {
+    "tmuxPaneId": "%12",
+    "tmuxSession": "hivemind",
+    "tmuxWindow": "1",
+    "cwd": "/Users/jacobmiller22/projects/hivemind",
+    "gitBranch": "main"
+  },
+  "payload": {
+    "status": "thinking",
+    "model": "Gemini 3.5 Flash",
+    "metadata": {}
+  }
 }
-
-export type DerivedStatus = 
-  | 'idle' 
-  | 'thinking' 
-  | 'tool-running' 
-  | 'awaiting-permission' 
-  | 'awaiting-input' 
-  | 'errored' 
-  | 'no-telemetry';
 ```
+
+### 2.2. Session State Representation (Daemon Storage)
+The daemon maintains a single flat database of logical Session records. There is no hierarchy in storage; sessions are identified solely by their unique `sessionId`. 
+
+To keep the daemon lightweight and agnostic, it does not manage complex lifecycle state flags or storage schemas. Instead, it stores raw metadata and maintains a single `lastActivity` datetime. 
+
+A Session record consists of:
+* **Session ID**: A logical unique identifier (e.g., Conversation ID).
+* **Derived Status**: The current status derived from telemetry events (`idle`, `thinking`, `tool-running`, `awaiting-permission`, `awaiting-input`, `errored`, `no-telemetry`).
+* **Model**: The model currently in use.
+* **Last Activity**: An RFC3339 timestamp recording when the most recent telemetry event or log modification occurred. The TUI client uses this timestamp to determine whether a session is active/inactive and to calculate elapsed duration since inactivity.
+* **Metadata Context**: Tmux coordinates (`tmuxPaneId`, `tmuxSession`, `tmuxWindow`), the current working directory (`cwd`), and `gitBranch`.
+* **Sub-agent Registry**: A key-value map of child sub-agents spawned by the parent session (containing `id`, `role`, `typeName`, `status`, `spawnedAt`, and `completedAt`).
+
+### 2.3. View Projections (Client Rendering)
+The TUI client subscribes to this flat `SessionState` list. It separates data modeling from user interface presentation:
+* **Tmux Projection**: Groups flat sessions by their `tmuxSession` and `tmuxWindow` metadata tags to render the primary tree layout. If location metadata is absent, it projects the session under an `"unmonitored"` category.
+* **Alternative Projections (MVP2)**: Because storage is flat, the TUI can instantly reorganize the UI into a **Project Directory Tree** (grouping by `cwd`) or a **Priority Attention List** (sorting by `awaiting-permission` and `errored` status first) entirely on the client side.
 
 ---
 
-## 3. Python Hook Adapter Design (`hivemind_hooks`)
+## 3. Hook Adapters & Plugin Architecture
 
-The hook adapter uses the native `google.antigravity.hooks` framework to capture lifecycle transitions.
+`hivemind` provides a pluggable telemetry model designed to support varied developer tools. 
 
-### 3.1. Telemetry Client Implementation
+### 3.1. Telemetry Flow
+Active adapters intercept native tool lifecycles and translate them into standard `hivemind` JSON events. 
 
-```python
-# filepath: src/hooks/hivemind_hooks.py
-import os
-import sys
-import json
-import socket
-import asyncio
-import datetime
-import subprocess
-from typing import Optional, Any
-from google.antigravity import types
-from google.antigravity.hooks import hooks
-
-SOCKET_PATH = os.path.expanduser("~/.config/hivemind/hivemind.sock")
-FALLBACK_SOCKET_PATH = "/tmp/hivemind.sock"
-
-class HivemindTelemetryClient:
-    def __init__(self):
-        self.session_id: Optional[str] = None
-        self.tmux_pane_id = os.environ.get("TMUX_PANE", "")
-        self.tmux_session = ""
-        self.tmux_window = ""
-        self.cwd = os.getcwd()
-        self.git_branch = self._resolve_git_branch()
-        self._resolve_tmux_coordinates()
-
-    def _resolve_git_branch(self) -> Optional[str]:
-        try:
-            res = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True, timeout=1)
-            return res.stdout.strip() if res.returncode == 0 else None
-        except Exception:
-            return None
-
-    def _resolve_tmux_coordinates(self):
-        if not self.tmux_pane_id:
-            return
-        try:
-            # Query tmux for current session and window index of this pane
-            res = subprocess.run(
-                ["tmux", "display-message", "-p", "-F", "#S #I", "-t", self.tmux_pane_id],
-                capture_output=True, text=True, timeout=1
-            )
-            if res.returncode == 0:
-                parts = res.stdout.strip().split()
-                if len(parts) >= 2:
-                    self.tmux_session = parts[0]
-                    self.tmux_window = parts[1]
-        except Exception:
-            pass
-
-    async def send_event(self, event_type: str, status: Optional[str] = None, payload: Optional[dict] = None):
-        if not self.session_id:
-            return
-
-        event = {
-            "type": "event",
-            "eventId": f"evt_{os.urandom(8).hex()}",
-            "sessionId": self.session_id,
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-            "eventType": event_type,
-            "context": {
-                "tmuxPaneId": self.tmux_pane_id,
-                "tmuxSession": self.tmux_session,
-                "tmuxWindow": self.tmux_window,
-                "cwd": self.cwd,
-                "gitBranch": self.git_branch
-            },
-            "payload": {
-                "status": status,
-                **(payload or {})
-            }
-        }
-
-        # Safe UDS write - must NEVER crash parent agent
-        try:
-            path = SOCKET_PATH if os.path.exists(os.path.dirname(SOCKET_PATH)) else FALLBACK_SOCKET_PATH
-            reader, writer = await asyncio.open_unix_connection(path)
-            writer.write(json.dumps(event).encode('utf-8') + b'\n')
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            # Silently degrade if socket or daemon is offline
-            pass
-
-# Singleton Client Instance
-client = HivemindTelemetryClient()
+```mermaid
+graph LR
+    A["Native AI Tool Hook<br/>(e.g. pre_tool)"] ==> B["Telemetry Hook/Shim<br/>(Translates to Schema)"]
+    B ==> C["hivemindd<br/>State Server"]
 ```
 
-### 3.2. AGY Lifecycle Hook Registrations
-
-```python
-# filepath: src/hooks/hivemind_hooks.py (continued)
-
-@hooks.on_session_start
-async def on_session_start(session_info: Any = None):
-    # Retrieve or generate Conversation ID
-    # In AGY SDK, the conversation ID is typically available on the context or generated here
-    client.session_id = getattr(session_info, "conversation_id", f"session_{os.urandom(8).hex()}")
-    await client.send_event("session_started", status="idle")
-
-@hooks.on_session_end
-async def on_session_end(session_info: Any = None):
-    await client.send_event("session_stopped", status="idle")
-
-@hooks.pre_turn
-async def pre_turn(prompt: str) -> types.HookResult:
-    await client.send_event("status_changed", status="thinking", payload={"prompt": prompt})
-    return types.HookResult(allow=True)
-
-@hooks.post_turn
-async def post_turn(response: str):
-    await client.send_event("status_changed", status="idle", payload={"response": response})
-
-@hooks.pre_tool_call_decide
-async def pre_tool(tool_call: types.ToolCall) -> types.HookResult:
-    # 1. Check for interactive permission request tool
-    if tool_call.name == "ask_permission":
-        await client.send_event("status_changed", status="awaiting-permission", payload={
-            "toolName": tool_call.args.get("Action"),
-            "toolTarget": tool_call.args.get("Target"),
-            "toolArgs": tool_call.args
-        })
-    # 2. Check for conversational user question
-    elif tool_call.name == "ask_question":
-        await client.send_event("status_changed", status="awaiting-input", payload={
-            "question": tool_call.args.get("questions")
-        })
-    # 3. Default active tool running state
-    else:
-        await client.send_event("status_changed", status="tool-running", payload={
-            "toolName": tool_call.name,
-            "toolArgs": tool_call.args
-        })
-    
-    return types.HookResult(allow=True)
-
-@hooks.on_tool_error
-async def on_tool_error(error: Exception):
-    await client.send_event("status_changed", status="errored", payload={
-        "errorType": type(error).__name__,
-        "errorMessage": str(error)
-    })
-```
-
-### 3.3. Hook Injection & Installation Mechanism
-
-To satisfy the single-command setup requirement (**FR-7.3**), `hivemind` will automate the injection of the `hivemind_hooks` adapter into the user's active shell or Python path:
-
-1. **Copy Adapter**: The `hivemind install-hooks` command copies `hivemind_hooks.py` to the global configuration directory: `~/.gemini/config/plugins/hivemind_hooks/`.
-2. **Environment Bootstrap**: The installer appends the plugin path to the standard Python search path inside the user's active shell profile (e.g., `~/.zshrc`, `~/.bashrc`):
-   ```bash
-   # Added by hivemind installer
-   export PYTHONPATH="$HOME/.gemini/config/plugins/hivemind_hooks:$PYTHONPATH"
-   ```
-3. **Dynamic Import on Agent Startup**:
-   Inside the AGY configuration runner, if the telemetry hook is available in the Python path, the SDK hooks manager dynamically imports `hivemind_hooks` during agent boot-up:
-   ```python
-   # Inside global bootloader/config
-   try:
-       import hivemind_hooks
-   except ImportError:
-       pass
-   ```
-   This ensures that the hooks are loaded natively and start broadcasting automatically for all active sessions without requiring the user to edit their Python agent source files manually.
+Adapters are decoupled from the state daemon and the transport protocol:
+1. **Tool-Agnostic Translation**: Adapters shield the daemon from specific CLI hook naming conventions. The adapter translates the tool's internal hooks (such as tool permissions, thinking states, or user questions) into the standard `status_changed` event.
+2. **Safe Communication**: Adapters implement non-blocking connection routines and must fail silently if the daemon server is not running, ensuring that telemetry monitoring never blocks or crashes the developer's agent execution.
 
 ---
 
 ## 4. Sub-agent Integration Workflow
 
-In the Google Antigravity SDK, multi-agent orchestration is natively managed using the standard tool-calling interface (e.g., calling `invoke_subagent`).
-
-```python
-# filepath: src/hooks/hivemind_hooks.py (continued)
-
-@hooks.pre_tool_call_decide
-async def pre_tool_subagent_check(tool_call: types.ToolCall) -> types.HookResult:
-    # Intercept subagent spawning
-    if tool_call.name == "invoke_subagent":
-        subagents = tool_call.args.get("Subagents", [])
-        for sa in subagents:
-            await client.send_event("subagent_spawned", payload={
-                "subagent": {
-                    "id": f"sub_{os.urandom(6).hex()}", # Replaced with actual ID if exposed
-                    "role": sa.get("Role", "Subagent"),
-                    "typeName": sa.get("TypeName", "self"),
-                    "status": "running"
-                }
-            })
-    return types.HookResult(allow=True)
-```
+Multi-agent swarms (e.g., sub-agents spawned via tools like `invoke_subagent` or sub-processes) are mapped as child elements under their parent logical `Session` record:
+* **Spawning**: When the parent agent initiates a sub-agent execution, the telemetry adapter sends a `subagent_spawned` event containing the child's `id`, `role`, and `typeName`.
+* **State Updates**: Updates to sub-agents (`running`, `completed`, `errored`) are sent via `subagent_status_changed` events.
+* **Staleness Tracking**: When a sub-agent transitions to a completed or errored state, the completion timestamp is recorded. The elapsed duration since completion is tracked, enabling the client interface to handle cool-offs and visibility thresholds.
 
 ---
 
 ## 5. Bidirectional Commands (Forward-Compatible MVP2)
 
-Because UDS represents a full-duplex socket, MVP2 bidirectional actions can be handled gracefully inside the synchronous `pre_tool_call_decide` hook.
-
-```python
-# Future MVP2 Concept
-@hooks.pre_tool_call_decide
-async def pre_tool_decide_bidirectional(tool_call: types.ToolCall) -> types.HookResult:
-    if tool_call.name == "ask_permission":
-        # Stream the block event to the daemon
-        await client.send_event("status_changed", status="awaiting-permission", ...)
-        
-        # Keep socket open and await manual command response from UDS
-        decision = await client.await_remote_decision(tool_call)
-        return types.HookResult(allow=decision == "allow")
-```
+Active Telemetry Channels are designed to accommodate full-duplex or request-response pipelines. Although MVP1 primarily utilizes unidirectional event streaming (agent to daemon), the protocol natively supports forward-compatible bidirectional command exchange:
+* **Interactive Prompts**: When a live session enters `awaiting-permission` status, the event context contains detailed tool call metadata.
+* **Remote Action**: In MVP2, the daemon can stream approval or denial commands back to the telemetry adapter. Depending on the adapter design, this is supported either over a long-lived persistent streaming channel or via request-response handshakes on connection-per-event setups, where the adapter can block on socket reads or poll for decisions.
 
 ---
 
@@ -343,32 +146,53 @@ async def pre_tool_decide_bidirectional(tool_call: types.ToolCall) -> types.Hook
 
 | Component | Technology | Rationale |
 |---|---|---|
-| **Daemon & CLI** | **Go (Golang)** | Generates a single, lightweight binary containing both the CLI (`hivemind`) and the daemon (`hivemindd`). Native, fast UDS support, clean concurrency primitives (goroutines/channels) for managing multi-client event broadcasting, and zero external dependency for end-users. |
+| **Daemon & CLI** | **Go (Golang)** | Generates a single, lightweight binary containing both the CLI (`hivemind`) and the daemon (`hivemindd`). Native socket/IPC support, clean concurrency primitives (goroutines/channels) for managing multi-client subscription broadcasts, and zero external dependency for end-users. |
 | **TUI Rendering** | **Bubble Tea (Go)** | The industry standard for beautiful, state-driven, highly testable terminal UIs. Features excellent keyboard navigation, viewport controls, and tree rendering capabilities. |
-| **Telemetry Adapters (Plugins)** | **Extensible JSON/UDS Protocol** | Pluggable, decoupled architecture. Supports the Python-based `hivemind_hooks` (via AGY SDK hooks) for the Antigravity CLI, as well as separate shims or adapters for external tools like Claude Code. |
+| **Telemetry Adapters (Plugins)** | **Language-Standard Protocol** | Pluggable, decoupled architecture. Extensible standard JSON event exchange. All adapters are written in Go unless strictly runtime-constrained by the client tool SDK. |
 
 ---
 
 ## 7. Testing & Verification Architecture
 
-To ensure high reliability across components, languages, and runtime configurations, `hivemind` implements a multi-tiered automated testing architecture:
+To ensure high reliability across varied environments, transports, and developer tools, `hivemind` implements a language-agnostic, multi-transport testing architecture.
 
-### 7.1. Unit Testing (Go Daemon)
-The core state transition logic, active pane tmux synchronization, and subscriber broadcasting mechanisms are covered by automated unit tests in `pkg/daemon/server_test.go`:
-* **`TestEventProcessing`**: Asserts that sending lifecycle state packets updates the in-memory tree representation correctly.
-* **`TestTmuxSyncAndPruning`**: Mocks the tmux pane CLI poller output to verify pane exit handling and cool-off pruning.
-* **`TestMultiClientBroadcasting`**: Runs the UDS server using a temporary socket and verifies that multiple concurrent clients subscribe and receive broadcasts simultaneously.
+```mermaid
+graph TD
+    E["Emitter Test Engine"] ==> F["Passive File Test Framework<br/>(Mock File Emitting)"]
+    E ==> S["Active Stream Test Framework<br/>(Mock Streaming Connections)"]
+    E ==> M["Tooling Adapter Matrix<br/>(Translation & Schema Parity)"]
 
-### 7.2. End-to-End Integration Testing (`cmd/hivemind/integration_test.go`)
-An in-depth, cross-language integration test suite is implemented in Go to prove that all tools are working together correctly. The execution flow is as follows:
+    subgraph "Mock File Verification"
+        F --> F1["Cold-Start Recovery"]
+        F --> F2["Modification Tracking"]
+        F --> F3["Inactivity Demarcation"]
+    end
 
-1. **Compilation**: The test compiles the current `cmd/hivemind/main.go` source code into a temporary `hivemind` executable to test actual build logic.
-2. **Spawning the Daemon**: Spawns the compiled binary in `daemon` mode with an isolated socket path `/tmp/hivemind_integration.sock`.
-3. **Simulating a Subscriber Client**: Dials the test socket and subscribes to state tree broadcasts.
-4. **Streaming Telemetry Events**: Executes the Python mock emitter (`src/hooks/mock_emitter.py`) in client mode targeting the test socket path. The emitter sends a complete lifecycle sequence (session started -> thinking -> running tool -> spawn subagent -> complete subagent -> session stopped).
-5. **Real-time Assertions**: The client subscriber reads the JSON broadcasts and asserts that the state changes propagate instantly across process boundaries. It verifies:
-   - Dynamic creation of tmux sessions.
-   - Status changes (`idle`, `thinking`, `tool-running`).
-   - Spawned child subagents and their lifecycles.
-6. **Graceful Teardown**: Automatically kills all spawned child processes and removes the temporary socket file upon completion.
+    subgraph "Mock Stream Verification"
+        S --> S1["Real-time Ingestion"]
+        S --> S2["Connection EOF Detection"]
+        S --> S3["Deduplication Coexistence"]
+    end
 
+    subgraph "Adapter Translation Verification"
+        M --> M1["Tool-Agnostic Shim Test"]
+        M --> M2["Harness Adapter Hooks Test"]
+    end
+```
+
+### 7.1. Passive File Test Framework (Mock File Emitting)
+This suite verifies the daemon's passive file poller and filesystem-driven state lifecycle:
+* **Cold-Start Recovery**: Asserts that placing a pre-populated transcript or JSON file into the monitored session directory correctly recovers the logical session state tree.
+* **Modification Tracking**: Simulates active user prompts by making sequential writes to the mock transcript files and asserting that the session status and timestamps update in the daemon.
+* **Inactivity Demarcation**: Asserts that when the mock file is left untouched beyond the configured window (e.g. 5 minutes), the daemon updates the session's `lastActivity` timestamp based on the file's last-modified timestamp, and the client or daemon tracks inactivity correctly without prematurely pruning the record from the state tree.
+
+### 7.2. Active Stream Test Framework (Mock Streaming Connections)
+This suite verifies real-time event-driven ingestion and channel-based process lifecycle tracking:
+* **Real-time Event Ingestion**: Launches a mock active telemetry client that dials the daemon's communication channel and sends status events. Asserts that derived status transitions propagate to the state tree with sub-second latency.
+* **Inactivity & EOF Detection**: Asserts that when a persistent stream connection is closed abruptly (EOF), or when short-lived connections cease sending events beyond a threshold, the daemon updates the `lastActivity` timestamp and handles appropriate session cool-off tracking.
+* **Deduplication Coexistence**: Connects both a mock active stream client and places a mock passive transcript file under the same `SessionID`. Asserts that the live active stream takes absolute priority, merging the location coordinates from the live stream and suppressing/pruning the passive duplicate record.
+
+### 7.3. Tooling Adapter Matrix (Translation & Schema Parity)
+This suite verifies tool-specific integration, ensuring various developer tool adapters translate their native hooks into correct `hivemind` schemas:
+* **Tool-Agnostic Shim Test**: Pipes mock wrapper outputs from active tools through shims. Asserts that the shims normalize these commands into the standard JSON schema with correct `DerivedStatus` transitions.
+* **Harness Adapter Hooks Test**: Runs a test harness that mocks standard SDK telemetry life cycles (session start, pre/post turns, and tool décider triggers). Asserts that the hook adapter translates the structures cleanly and transmits them over the communication channel with zero exceptions.

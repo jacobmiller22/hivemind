@@ -17,7 +17,6 @@ import (
 // Server implements the Hivemind state daemon.
 type Server struct {
 	SocketPath         string
-	FallbackSocketPath string
 	SessionsDir        string
 	State              *StateTree
 	StateMu            sync.Mutex
@@ -38,10 +37,9 @@ type Server struct {
 }
 
 // NewServer initializes a new Server with default settings.
-func NewServer(socketPath, fallbackPath, sessionsDir string) *Server {
+func NewServer(socketPath, sessionsDir string) *Server {
 	return &Server{
 		SocketPath:         socketPath,
-		FallbackSocketPath: fallbackPath,
 		SessionsDir:        sessionsDir,
 		State: &StateTree{
 			Sessions: make(map[string]*SessionState),
@@ -85,13 +83,13 @@ func DefaultListPanes() ([]string, error) {
 }
 
 // ListenUDS sets up the Unix Domain Socket listener.
-func ListenUDS(socketPath, fallbackPath string) (net.Listener, string, error) {
+func ListenUDS(socketPath string) (net.Listener, string, error) {
 	resolvedPath := ResolveSocketPath(socketPath)
 
 	// Attempt to create the parent directories
 	dir := filepath.Dir(resolvedPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		resolvedPath = ResolveSocketPath(fallbackPath)
+		return nil, "", err
 	}
 
 	// Remove existing socket file if it exists
@@ -99,13 +97,7 @@ func ListenUDS(socketPath, fallbackPath string) (net.Listener, string, error) {
 
 	l, err := net.Listen("unix", resolvedPath)
 	if err != nil {
-		// Fallback socket path
-		resolvedPath = ResolveSocketPath(fallbackPath)
-		_ = os.Remove(resolvedPath)
-		l, err = net.Listen("unix", resolvedPath)
-		if err != nil {
-			return nil, "", err
-		}
+		return nil, "", err
 	}
 
 	return l, resolvedPath, nil
@@ -168,8 +160,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 			// Send current aggregated state tree immediately
 			s.StateMu.Lock()
-			grouped := s.buildGroupedStateTree()
-			stateJSON, err := json.Marshal(grouped)
+			stateJSON, err := json.Marshal(s.State)
 			s.StateMu.Unlock()
 			if err == nil {
 				_, _ = conn.Write(append(stateJSON, '\n'))
@@ -239,9 +230,9 @@ func (s *Server) processEvent(event *HivemindEvent) {
 
 	session.LastEventReceived = now
 	if !event.Timestamp.IsZero() {
-		session.LastEventTime = event.Timestamp
+		session.LastActivity = event.Timestamp
 	} else {
-		session.LastEventTime = now
+		session.LastActivity = now
 	}
 
 	switch event.EventType {
@@ -277,10 +268,10 @@ func (s *Server) processEvent(event *HivemindEvent) {
 				Role:      saPayload.Role,
 				TypeName:  saPayload.TypeName,
 				Status:    status,
-				SpawnedAt: session.LastEventTime,
+				SpawnedAt: session.LastActivity,
 			}
 			if status == SubagentCompleted || status == SubagentErrored {
-				sa.CompletedAt = &session.LastEventTime
+				sa.CompletedAt = &session.LastActivity
 			}
 			session.Subagents[saPayload.ID] = sa
 		}
@@ -294,13 +285,13 @@ func (s *Server) processEvent(event *HivemindEvent) {
 					ID:        saPayload.ID,
 					Role:      saPayload.Role,
 					TypeName:  saPayload.TypeName,
-					SpawnedAt: session.LastEventTime,
+					SpawnedAt: session.LastActivity,
 				}
 				session.Subagents[saPayload.ID] = sa
 			}
 			sa.Status = SubagentStatus(saPayload.Status)
 			if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
-				completedAt := session.LastEventTime
+				completedAt := session.LastActivity
 				sa.CompletedAt = &completedAt
 			}
 		}
@@ -459,17 +450,28 @@ func (s *Server) SyncFileSessions() {
 		fss := p.fss
 		session, exists := s.State.Sessions[p.key]
 		if exists {
-			session.Status = fss.Status
-			session.Model = fss.Model
-			session.Cwd = fss.Cwd
-			session.GitBranch = fss.GitBranch
-			session.TmuxPaneID = fss.TmuxPaneID
-			session.TmuxSession = fss.TmuxSession
-			session.TmuxWindow = fss.TmuxWindow
-			session.Subagents = fss.Subagents
-			session.LastEventTime = now
-			session.LastEventReceived = now
-			stateChanged = true
+			changed := session.Status != fss.Status ||
+				session.Model != fss.Model ||
+				session.Cwd != fss.Cwd ||
+				session.GitBranch != fss.GitBranch ||
+				session.TmuxPaneID != fss.TmuxPaneID ||
+				session.TmuxSession != fss.TmuxSession ||
+				session.TmuxWindow != fss.TmuxWindow ||
+				!subagentsEqual(session.Subagents, fss.Subagents)
+
+			if changed {
+				session.Status = fss.Status
+				session.Model = fss.Model
+				session.Cwd = fss.Cwd
+				session.GitBranch = fss.GitBranch
+				session.TmuxPaneID = fss.TmuxPaneID
+				session.TmuxSession = fss.TmuxSession
+				session.TmuxWindow = fss.TmuxWindow
+				session.Subagents = fss.Subagents
+				session.LastActivity = now
+				session.LastEventReceived = now
+				stateChanged = true
+			}
 		} else {
 			subagents := fss.Subagents
 			if subagents == nil {
@@ -484,7 +486,7 @@ func (s *Server) SyncFileSessions() {
 				GitBranch:         fss.GitBranch,
 				Model:             fss.Model,
 				Status:            fss.Status,
-				LastEventTime:     now,
+				LastActivity:      now,
 				LastEventReceived: now,
 				Subagents:         subagents,
 			}
@@ -493,10 +495,24 @@ func (s *Server) SyncFileSessions() {
 	}
 
 	// Prune file-based sessions whose JSON file was deleted
-	for id := range s.State.Sessions {
-		if strings.HasPrefix(id, "file:") && !seenIDs[id] {
-			delete(s.State.Sessions, id)
-			stateChanged = true
+	for id, session := range s.State.Sessions {
+		if strings.HasPrefix(id, "file:") {
+			jsonPath := filepath.Join(s.SessionsDir, session.SessionID+".json")
+			logsDir := filepath.Join(s.AntigravityDir, session.SessionID, ".system_generated", "logs")
+			transcriptPath1 := filepath.Join(logsDir, "transcript.jsonl")
+			transcriptPath2 := filepath.Join(logsDir, "transcript_full.jsonl")
+
+			_, errJson := os.Stat(jsonPath)
+			_, errTrans1 := os.Stat(transcriptPath1)
+			_, errTrans2 := os.Stat(transcriptPath2)
+
+			jsonExists := errJson == nil
+			transExists := errTrans1 == nil || errTrans2 == nil
+
+			if !jsonExists && !transExists {
+				delete(s.State.Sessions, id)
+				stateChanged = true
+			}
 		}
 	}
 
@@ -507,8 +523,7 @@ func (s *Server) SyncFileSessions() {
 
 // broadcastStateLocked serializes and streams the updated StateTree to all open subscribers.
 func (s *Server) broadcastStateLocked() {
-	grouped := s.buildGroupedStateTree()
-	stateJSON, err := json.Marshal(grouped)
+	stateJSON, err := json.Marshal(s.State)
 	if err != nil {
 		return
 	}
@@ -532,32 +547,6 @@ func (s *Server) GetState() *StateTree {
 	return s.State
 }
 
-// buildGroupedStateTree groups the flat session map by tmux session for TUI compatibility.
-func (s *Server) buildGroupedStateTree() *GroupedStateTree {
-	grouped := &GroupedStateTree{
-		TmuxSessions: make(map[string]*TmuxSessionState),
-	}
-
-	for _, session := range s.State.Sessions {
-		tName := session.TmuxSession
-		if tName == "" {
-			tName = "unmonitored"
-		}
-
-		tSession, exists := grouped.TmuxSessions[tName]
-		if !exists {
-			tSession = &TmuxSessionState{
-				Name:     tName,
-				Sessions: make(map[string]*SessionState),
-			}
-			grouped.TmuxSessions[tName] = tSession
-		}
-
-		tSession.Sessions[session.SessionID] = session
-	}
-
-	return grouped
-}
 
 // Close closes all active subscriber connections.
 func (s *Server) Close() error {
@@ -621,17 +610,28 @@ func (s *Server) SyncAntigravitySessions() {
 		fss := p.fss
 		session, exists := s.State.Sessions[p.key]
 		if exists {
-			session.Status = fss.Status
-			session.Model = fss.Model
-			session.Cwd = fss.Cwd
-			session.GitBranch = fss.GitBranch
-			session.TmuxPaneID = fss.TmuxPaneID
-			session.TmuxSession = fss.TmuxSession
-			session.TmuxWindow = fss.TmuxWindow
-			session.Subagents = fss.Subagents
-			session.LastEventTime = now
-			session.LastEventReceived = now
-			stateChanged = true
+			changed := session.Status != fss.Status ||
+				session.Model != fss.Model ||
+				session.Cwd != fss.Cwd ||
+				session.GitBranch != fss.GitBranch ||
+				session.TmuxPaneID != fss.TmuxPaneID ||
+				session.TmuxSession != fss.TmuxSession ||
+				session.TmuxWindow != fss.TmuxWindow ||
+				!subagentsEqual(session.Subagents, fss.Subagents)
+
+			if changed {
+				session.Status = fss.Status
+				session.Model = fss.Model
+				session.Cwd = fss.Cwd
+				session.GitBranch = fss.GitBranch
+				session.TmuxPaneID = fss.TmuxPaneID
+				session.TmuxSession = fss.TmuxSession
+				session.TmuxWindow = fss.TmuxWindow
+				session.Subagents = fss.Subagents
+				session.LastActivity = now
+				session.LastEventReceived = now
+				stateChanged = true
+			}
 		} else {
 			subagents := fss.Subagents
 			if subagents == nil {
@@ -646,7 +646,7 @@ func (s *Server) SyncAntigravitySessions() {
 				GitBranch:         fss.GitBranch,
 				Model:             fss.Model,
 				Status:            fss.Status,
-				LastEventTime:     now,
+				LastActivity:      now,
 				LastEventReceived: now,
 				Subagents:         subagents,
 			}
@@ -655,10 +655,24 @@ func (s *Server) SyncAntigravitySessions() {
 	}
 
 	// Prune file-based sessions whose transcripts were deleted
-	for id := range s.State.Sessions {
-		if strings.HasPrefix(id, "file:") && !seenIDs[id] {
-			delete(s.State.Sessions, id)
-			stateChanged = true
+	for id, session := range s.State.Sessions {
+		if strings.HasPrefix(id, "file:") {
+			jsonPath := filepath.Join(s.SessionsDir, session.SessionID+".json")
+			logsDir := filepath.Join(s.AntigravityDir, session.SessionID, ".system_generated", "logs")
+			transcriptPath1 := filepath.Join(logsDir, "transcript.jsonl")
+			transcriptPath2 := filepath.Join(logsDir, "transcript_full.jsonl")
+
+			_, errJson := os.Stat(jsonPath)
+			_, errTrans1 := os.Stat(transcriptPath1)
+			_, errTrans2 := os.Stat(transcriptPath2)
+
+			jsonExists := errJson == nil
+			transExists := errTrans1 == nil || errTrans2 == nil
+
+			if !jsonExists && !transExists {
+				delete(s.State.Sessions, id)
+				stateChanged = true
+			}
 		}
 	}
 
@@ -843,5 +857,30 @@ func extractModel(content string) string {
 		}
 	}
 	return ""
+}
+
+func subagentsEqual(a, b map[string]*Subagent) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		vb, exists := b[k]
+		if !exists {
+			return false
+		}
+		if v.ID != vb.ID || v.Role != vb.Role || v.TypeName != vb.TypeName || v.Status != vb.Status {
+			return false
+		}
+		if !v.SpawnedAt.Equal(vb.SpawnedAt) {
+			return false
+		}
+		if (v.CompletedAt == nil) != (vb.CompletedAt == nil) {
+			return false
+		}
+		if v.CompletedAt != nil && vb.CompletedAt != nil && !v.CompletedAt.Equal(*vb.CompletedAt) {
+			return false
+		}
+	}
+	return true
 }
 

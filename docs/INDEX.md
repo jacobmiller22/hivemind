@@ -18,6 +18,14 @@ The following documents define the various phases and aspects of the project. De
 | **Technical Design** | [DESIGN.md](file:///Users/jacobmiller22/projects/hivemind/docs/DESIGN.md) | Component architecture, communication protocols (UDS/JSON), schemas, and testing strategy. | Before writing code for any new component, interface change, or schema adjustment. |
 | **Project Backlog** | [BACKLOG.md](file:///Users/jacobmiller22/projects/hivemind/docs/BACKLOG.md) | List of planned improvements, UX refinements, bug fixes, and feature candidates. | When a task is completed, reprioritized, or when a new feedback item is logged. |
 
+### 1.1. Tool & Plugin Integrations
+
+Detailed design documents, shims, and architectural integration notes for external developer tool plugins:
+
+| Plugin | Path | Description | Integration Status |
+| :--- | :--- | :--- | :--- |
+| **Claude Code** | [CLAUDECODE.md](file:///Users/jacobmiller22/projects/hivemind/docs/plugins/CLAUDECODE.md) | Integration path via active lifecycle hooks and passive transcript discovery. | Planned / Conceptual |
+
 ---
 
 ## 2. Architecture & Design Decisions Workflow

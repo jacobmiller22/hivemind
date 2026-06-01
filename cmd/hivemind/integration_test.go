@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,13 +16,15 @@ import (
 )
 
 func TestEndToEndIntegration(t *testing.T) {
-	// Paths
+	// Paths using an isolated temporary directory
+	tmpDir := t.TempDir()
 	testSocket := "/tmp/hivemind_integration.sock"
-	testBinary := "/tmp/hivemind_integration_bin"
+	testBinary := filepath.Join(tmpDir, "hivemind_integration_bin")
+	testSessionsDir := filepath.Join(tmpDir, "sessions")
+	testAntigravityDir := filepath.Join(tmpDir, "antigravity")
+
 	_ = os.Remove(testSocket)
-	_ = os.Remove(testBinary)
 	defer os.Remove(testSocket)
-	defer os.Remove(testBinary)
 
 	// 1. Compile the cmd/hivemind code to ensure we test the latest implementation
 	t.Log("[*] Compiling hivemind binary for integration test...")
@@ -34,16 +37,15 @@ func TestEndToEndIntegration(t *testing.T) {
 
 	// 2. Spawn the daemon in the background using the integration test socket
 	t.Logf("[*] Spawning background daemon on socket: %s", testSocket)
-	cmdDaemon := exec.Command(testBinary, "-uds", testSocket, "daemon")
+	cmdDaemon := exec.Command(testBinary, "-uds", testSocket, "-sessions-dir", testSessionsDir, "-antigravity-dir", testAntigravityDir, "daemon")
 	cmdDaemon.Dir = "../../" // run relative to repo root
 	
-	// Create log file for the integration daemon
-	logFile, err := os.Create("/tmp/hivemind_integration_daemon.log")
+	// Create log file in the isolated temp directory
+	logFile, err := os.Create(filepath.Join(tmpDir, "hivemind_integration_daemon.log"))
 	if err != nil {
 		t.Fatalf("Failed to create log file: %v", err)
 	}
 	defer logFile.Close()
-	defer os.Remove("/tmp/hivemind_integration_daemon.log")
 	cmdDaemon.Stdout = logFile
 	cmdDaemon.Stderr = logFile
 
@@ -67,7 +69,8 @@ func TestEndToEndIntegration(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if !socketCreated {
-		t.Fatalf("UDS socket was not created at %s within timeout", testSocket)
+		logContent, _ := os.ReadFile(filepath.Join(tmpDir, "hivemind_integration_daemon.log"))
+		t.Fatalf("UDS socket was not created at %s within timeout. Daemon log:\n%s", testSocket, string(logContent))
 	}
 	t.Log("[+] Daemon socket initialized successfully")
 
@@ -138,35 +141,33 @@ func TestEndToEndIntegration(t *testing.T) {
 		case state := <-broadcastsChan:
 			finalState = state
 			// Check sessions
-			for _, tSession := range state.TmuxSessions {
-				for _, session := range tSession.Sessions {
-					// A. Check for parent session states
-					if strings.HasPrefix(session.SessionID, "session_parent") {
-						if session.Status == "thinking" {
-							foundThinking = true
-						}
-						if session.Status == "awaiting-input" {
-							foundAwaitingInput = true
-						}
+			for _, session := range state.Sessions {
+				// A. Check for parent session states
+				if strings.HasPrefix(session.SessionID, "session_parent") {
+					if session.Status == "thinking" {
+						foundThinking = true
+					}
+					if session.Status == "awaiting-input" {
+						foundAwaitingInput = true
+					}
 
-						// B. Check for child subagent lifecycles
-						for _, sa := range session.Subagents {
-							if sa.Role == "Code Optimizer" {
-								if sa.Status == "running" {
-									foundSubagentRunning = true
-								}
-								if sa.Status == "completed" {
-									foundSubagentCompleted = true
-								}
+					// B. Check for child subagent lifecycles
+					for _, sa := range session.Subagents {
+						if sa.Role == "Code Optimizer" {
+							if sa.Status == "running" {
+								foundSubagentRunning = true
+							}
+							if sa.Status == "completed" {
+								foundSubagentCompleted = true
 							}
 						}
 					}
+				}
 
-					// C. Check for child subagent session status changes
-					if strings.HasPrefix(session.SessionID, "session_child") {
-						if session.Status == "awaiting-permission" {
-							foundPermissionPrompt = true
-						}
+				// C. Check for child subagent session status changes
+				if strings.HasPrefix(session.SessionID, "session_child") {
+					if session.Status == "awaiting-permission" {
+						foundPermissionPrompt = true
 					}
 				}
 			}
@@ -209,17 +210,14 @@ func TestEndToEndIntegration(t *testing.T) {
 		t.Log("✔ Parent session correctly transitioned to 'awaiting-input'")
 	}
 
-	// B. Validate final tree structure groupings
-	if len(finalState.TmuxSessions) == 0 {
-		t.Error("FAIL: Final state tree contains zero tmux sessions")
+	// B. Validate final tree structure sessions
+	if len(finalState.Sessions) == 0 {
+		t.Error("FAIL: Final state tree contains zero sessions")
 	} else {
-		for _, tSession := range finalState.TmuxSessions {
-			t.Logf("✔ Verified active tmux session grouping: %s", tSession.Name)
-			for _, session := range tSession.Sessions {
-				t.Logf("  ├─ Active Agent Pane: %s (Status: %s, Model: %s)", session.TmuxPaneID, session.Status, session.Model)
-				for _, sa := range session.Subagents {
-					t.Logf("  │  └─ Active Subagent: %s (Status: %s, Type: %s)", sa.Role, sa.Status, sa.TypeName)
-				}
+		for _, session := range finalState.Sessions {
+			t.Logf("  ├─ Active Agent Pane: %s (Status: %s, Model: %s)", session.TmuxPaneID, session.Status, session.Model)
+			for _, sa := range session.Subagents {
+				t.Logf("  │  └─ Active Subagent: %s (Status: %s, Type: %s)", sa.Role, sa.Status, sa.TypeName)
 			}
 		}
 	}
@@ -259,18 +257,15 @@ func contextWithTimeout(t *testing.T, d time.Duration) (*mockCtx, contextCancelF
 }
 
 func TestFileTailingIntegration(t *testing.T) {
-	// Paths
+	// Paths using an isolated temporary directory
+	tmpDir := t.TempDir()
 	testSocket := "/tmp/hivemind_file_integration.sock"
-	testBinary := "/tmp/hivemind_file_integration_bin"
-	testBrainDir := "/tmp/hivemind_integration_brain"
+	testBinary := filepath.Join(tmpDir, "hivemind_file_integration_bin")
+	testBrainDir := filepath.Join(tmpDir, "antigravity")
+	testSessionsDir := filepath.Join(tmpDir, "sessions")
 
 	_ = os.Remove(testSocket)
-	_ = os.Remove(testBinary)
-	_ = os.RemoveAll(testBrainDir)
-
 	defer os.Remove(testSocket)
-	defer os.Remove(testBinary)
-	defer os.RemoveAll(testBrainDir)
 
 	// 1. Compile the cmd/hivemind code
 	t.Log("[*] Compiling hivemind binary for integration test...")
@@ -280,16 +275,16 @@ func TestFileTailingIntegration(t *testing.T) {
 	}
 	t.Log("[+] Compilation successful")
 
-	// 2. Spawn the daemon with -enabled-tools=antigravity and custom -antigravity-dir
+	// 2. Spawn the daemon with -enabled-tools=antigravity,uds, custom -antigravity-dir, and custom -sessions-dir
 	t.Logf("[*] Spawning background daemon on socket: %s", testSocket)
-	cmdDaemon := exec.Command(testBinary, "-uds", testSocket, "-enabled-tools", "antigravity,uds", "-antigravity-dir", testBrainDir, "-file-poll", "10ms", "daemon")
+	cmdDaemon := exec.Command(testBinary, "-uds", testSocket, "-enabled-tools", "antigravity,uds", "-antigravity-dir", testBrainDir, "-sessions-dir", testSessionsDir, "-file-poll", "10ms", "daemon")
 	
-	logFile, err := os.Create("/tmp/hivemind_file_integration_daemon.log")
+	// Create log file in the isolated temp directory
+	logFile, err := os.Create(filepath.Join(tmpDir, "hivemind_file_integration_daemon.log"))
 	if err != nil {
 		t.Fatalf("Failed to create log file: %v", err)
 	}
 	defer logFile.Close()
-	defer os.Remove("/tmp/hivemind_file_integration_daemon.log")
 	cmdDaemon.Stdout = logFile
 	cmdDaemon.Stderr = logFile
 
@@ -313,7 +308,8 @@ func TestFileTailingIntegration(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if !socketCreated {
-		t.Fatalf("UDS socket was not created at %s within timeout", testSocket)
+		logContent, _ := os.ReadFile(filepath.Join(tmpDir, "hivemind_file_integration_daemon.log"))
+		t.Fatalf("UDS socket was not created at %s within timeout. Daemon log:\n%s", testSocket, string(logContent))
 	}
 	t.Log("[+] Daemon socket initialized successfully")
 
@@ -386,35 +382,33 @@ func TestFileTailingIntegration(t *testing.T) {
 		case state := <-broadcastsChan:
 			finalState = state
 			// Check sessions
-			for _, tSession := range state.TmuxSessions {
-				for _, session := range tSession.Sessions {
-					// Check for parent session states (prefixed with file:)
-					if strings.HasPrefix(session.SessionID, "session_parent") {
-						if session.Status == "thinking" {
-							foundThinking = true
-						}
-						if session.Status == "tool-running" {
-							foundToolRunning = true
-						}
-						if session.Status == "awaiting-permission" {
-							foundPermissionPrompt = true
-						}
-						if session.Status == "awaiting-input" {
-							foundAwaitingInput = true
-						}
-						if session.Status == "idle" {
-							foundIdle = true
-						}
+			for _, session := range state.Sessions {
+				// Check for parent session states (prefixed with file:)
+				if strings.HasPrefix(session.SessionID, "session_parent") {
+					if session.Status == "thinking" {
+						foundThinking = true
+					}
+					if session.Status == "tool-running" {
+						foundToolRunning = true
+					}
+					if session.Status == "awaiting-permission" {
+						foundPermissionPrompt = true
+					}
+					if session.Status == "awaiting-input" {
+						foundAwaitingInput = true
+					}
+					if session.Status == "idle" {
+						foundIdle = true
+					}
 
-						// Check for subagents
-						for _, sa := range session.Subagents {
-							if sa.Role == "Code Optimizer" {
-								if sa.Status == "running" {
-									foundSubagentRunning = true
-								}
-								if sa.Status == "completed" {
-									foundSubagentCompleted = true
-								}
+					// Check for subagents
+					for _, sa := range session.Subagents {
+						if sa.Role == "Code Optimizer" {
+							if sa.Status == "running" {
+								foundSubagentRunning = true
+							}
+							if sa.Status == "completed" {
+								foundSubagentCompleted = true
 							}
 						}
 					}
@@ -469,10 +463,10 @@ func TestFileTailingIntegration(t *testing.T) {
 		t.Log("✔ Parent successfully returned to 'idle'")
 	}
 
-	// B. Validate final tree structure groupings
-	if len(finalState.TmuxSessions) > 0 {
-		for _, tSession := range finalState.TmuxSessions {
-			t.Logf("✔ Verified active tmux session grouping: %s", tSession.Name)
+	// B. Validate final tree structure sessions
+	if len(finalState.Sessions) > 0 {
+		for _, session := range finalState.Sessions {
+			t.Logf("✔ Verified active session: %s", session.SessionID)
 		}
 	} else {
 		t.Log("✔ Final state tree pruned successfully (session folder removed)")

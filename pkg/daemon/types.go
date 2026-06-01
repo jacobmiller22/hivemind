@@ -83,7 +83,7 @@ type SessionState struct {
 	GitBranch     string               `json:"gitBranch,omitempty"`
 	Model         string               `json:"model,omitempty"`
 	Status        DerivedStatus        `json:"status"`
-	LastEventTime time.Time            `json:"lastEventTimestamp"`
+	LastActivity  time.Time            `json:"lastActivity"`
 	Subagents     map[string]*Subagent `json:"subagents"` // subagent ID -> Subagent
 
 	// Internal tracking fields for pruning & stale checks
@@ -97,16 +97,6 @@ type StateTree struct {
 	Sessions map[string]*SessionState `json:"sessions"` // SessionID -> SessionState
 }
 
-// TmuxSessionState groups agent sessions by tmux session, matching client expectations.
-type TmuxSessionState struct {
-	Name     string                   `json:"name"`
-	Sessions map[string]*SessionState `json:"sessions"`
-}
-
-// GroupedStateTree represents the hierarchical tree structure broadcasted to TUI clients.
-type GroupedStateTree struct {
-	TmuxSessions map[string]*TmuxSessionState `json:"tmuxSessions"`
-}
 
 // FileSessionState represents a session state read from a JSON file on disk.
 type FileSessionState struct {

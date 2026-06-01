@@ -20,7 +20,7 @@ func (a *GenericUDSAdapter) Name() string {
 }
 
 func (a *GenericUDSAdapter) Start(ctx context.Context, s *Server) error {
-	l, resolvedPath, err := ListenUDS(s.SocketPath, s.FallbackSocketPath)
+	l, resolvedPath, err := ListenUDS(s.SocketPath)
 	if err != nil {
 		return err
 	}

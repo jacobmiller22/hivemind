@@ -26,6 +26,7 @@ func main() {
 	antigravityDirFlag := flag.String("antigravity-dir", "", "Custom path to search for Antigravity transcript files")
 	sessionsDirFlag := flag.String("sessions-dir", "", "Custom path to look for mock sessions JSON files")
 	filePollFlag := flag.String("file-poll", "1s", "Polling interval for file adapters (e.g. 1s, 500ms)")
+	restartFlag := flag.Bool("restart", false, "Restart the background daemon if it is already running")
 	flag.Parse()
 
 	subcommand := ""
@@ -43,7 +44,7 @@ func main() {
 	case "help":
 		printHelp()
 	case "":
-		runClient(*udsFlag, *demoFlag)
+		runClient(*udsFlag, *demoFlag, *restartFlag)
 	default:
 		if subcommand == "-h" || subcommand == "--help" || subcommand == "help" {
 			printHelp()
@@ -71,12 +72,12 @@ func runDaemon(customUdsPath, enabledTools, customAntigravityDir, customSessions
 
 	antigravityDir := customAntigravityDir
 	if antigravityDir == "" {
-		antigravityDir = client.ResolvePath("~/.gemini/antigravity/brain")
+		antigravityDir = client.ResolvePath("~/.gemini/antigravity-cli/brain")
 	} else {
 		antigravityDir = client.ResolvePath(antigravityDir)
 	}
 
-	s := daemon.NewServer(socketPath, fallbackPath, sessionsDir)
+	s := daemon.NewServer(socketPath, sessionsDir)
 	s.AntigravityDir = antigravityDir
 
 	if pollDur, err := time.ParseDuration(filePoll); err == nil {
@@ -134,6 +135,11 @@ func runDaemon(customUdsPath, enabledTools, customAntigravityDir, customSessions
 		activeToolNames = append(activeToolNames, a.Name())
 	}
 	fmt.Printf("Active tools:    %s\n", strings.Join(activeToolNames, ", "))
+
+	pidFile := client.ResolvePath("~/.config/hivemind/daemon.pid")
+	_ = os.MkdirAll(filepath.Dir(pidFile), 0755)
+	_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
+	defer os.Remove(pidFile)
 
 	if err := s.Start(ctx); err != nil {
 		fmt.Printf("Daemon error: %v\n", err)
@@ -205,9 +211,13 @@ func runInstallHooks() {
 	}
 }
 
-func runClient(udsPath string, runDemo bool) {
+func runClient(udsPath string, runDemo bool, restartDaemon bool) {
 	if udsPath == "" {
 		udsPath = client.ResolvePath("~/.config/hivemind/hivemind.sock")
+	}
+
+	if restartDaemon {
+		killExistingDaemon()
 	}
 
 	runDemoMode := runDemo
@@ -306,10 +316,44 @@ Usage:
 
 Options:
   -demo                            Run TUI in offline interactive demo mode with mock data
+  -restart                         Restart the background daemon if it is already running
   -uds <path>                      Custom Unix Domain Socket path (default: ~/.config/hivemind/hivemind.sock)
   -enabled-tools <list>            Comma-separated list of active tools (all, uds, mock-file, antigravity) (default: all)
-  -antigravity-dir <path>          Custom path to search for Antigravity transcripts (default: ~/.gemini/antigravity/brain)
+  -antigravity-dir <path>          Custom path to search for Antigravity transcripts (default: ~/.gemini/antigravity-cli/brain)
   -sessions-dir <path>             Custom path for mock session JSON files (default: ~/.config/hivemind/sessions)
 `
 	fmt.Print(helpText)
+}
+
+func killExistingDaemon() {
+	pidFile := client.ResolvePath("~/.config/hivemind/daemon.pid")
+	data, err := os.ReadFile(pidFile)
+	if err == nil {
+		var pid int
+		if _, err := fmt.Sscanf(string(data), "%d", &pid); err == nil {
+			proc, err := os.FindProcess(pid)
+			if err == nil {
+				fmt.Printf("Stopping existing daemon (PID %d)...\n", pid)
+				// Send SIGTERM
+				_ = proc.Signal(syscall.SIGTERM)
+
+				// Wait for it to exit
+				exited := false
+				for i := 0; i < 10; i++ {
+					// Check if process is still running by sending signal 0
+					if err := proc.Signal(syscall.Signal(0)); err != nil {
+						exited = true
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+
+				if !exited {
+					// Force kill
+					fmt.Printf("Force killing daemon (PID %d)...\n", pid)
+					_ = proc.Kill()
+				}
+			}
+		}
+	}
 }

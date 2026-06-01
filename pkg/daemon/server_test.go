@@ -11,7 +11,7 @@ import (
 
 // TestEventProcessing verifies that all event types transition the state tree correctly.
 func TestEventProcessing(t *testing.T) {
-	s := NewServer("", "", "")
+	s := NewServer("", "")
 	s.SubagentCoolOff = 1 * time.Second
 	s.SessionCoolOff = 1 * time.Second
 
@@ -129,7 +129,7 @@ func TestEventProcessing(t *testing.T) {
 
 // TestTmuxSyncAndPruning verifies that closed panes transition to completed and are eventually pruned.
 func TestTmuxSyncAndPruning(t *testing.T) {
-	s := NewServer("", "", "")
+	s := NewServer("", "")
 	s.SubagentCoolOff = 50 * time.Millisecond
 	s.SessionCoolOff = 50 * time.Millisecond
 
@@ -222,9 +222,8 @@ func TestTmuxSyncAndPruning(t *testing.T) {
 // TestMultiClientBroadcasting verifies multi-client subscriptions and state tree event broadcasts.
 func TestMultiClientBroadcasting(t *testing.T) {
 	socketPath := "/tmp/hivemind_test_main.sock"
-	fallbackPath := "/tmp/hivemind_test_fallback.sock"
 
-	s := NewServer(socketPath, fallbackPath, "")
+	s := NewServer(socketPath, "")
 	s.Adapters = []ToolAdapter{&GenericUDSAdapter{}}
 	s.ListPanesFunc = func() ([]string, error) {
 		return []string{"%1"}, nil
@@ -261,12 +260,12 @@ func TestMultiClientBroadcasting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client 1 read failed: %v", err)
 	}
-	var state1 GroupedStateTree
+	var state1 StateTree
 	if err := json.Unmarshal([]byte(line1), &state1); err != nil {
 		t.Fatalf("client 1 initial state unmarshal failed: %v", err)
 	}
-	if len(state1.TmuxSessions) != 0 {
-		t.Errorf("expected 0 sessions initially, got %d", len(state1.TmuxSessions))
+	if len(state1.Sessions) != 0 {
+		t.Errorf("expected 0 sessions initially, got %d", len(state1.Sessions))
 	}
 
 	// Connect Client 2
@@ -288,7 +287,7 @@ func TestMultiClientBroadcasting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client 2 read failed: %v", err)
 	}
-	var state2 GroupedStateTree
+	var state2 StateTree
 	if err := json.Unmarshal([]byte(line2), &state2); err != nil {
 		t.Fatalf("client 2 initial state unmarshal failed: %v", err)
 	}
@@ -322,13 +321,9 @@ func TestMultiClientBroadcasting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client 1 failed to read broadcast: %v", err)
 	}
-	var updateState1 GroupedStateTree
+	var updateState1 StateTree
 	_ = json.Unmarshal([]byte(updateLine1), &updateState1)
-	tSession1, exists := updateState1.TmuxSessions["unmonitored"]
-	if !exists {
-		t.Fatal("client 1 did not receive the update (no unmonitored tmux session)")
-	}
-	sess1, exists := tSession1.Sessions["session_broadcast"]
+	sess1, exists := updateState1.Sessions["session_broadcast"]
 	if !exists {
 		t.Fatal("client 1 did not receive the update (no session_broadcast)")
 	}
@@ -337,13 +332,9 @@ func TestMultiClientBroadcasting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client 2 failed to read broadcast: %v", err)
 	}
-	var updateState2 GroupedStateTree
+	var updateState2 StateTree
 	_ = json.Unmarshal([]byte(updateLine2), &updateState2)
-	tSession2, exists := updateState2.TmuxSessions["unmonitored"]
-	if !exists {
-		t.Fatal("client 2 did not receive the update (no unmonitored tmux session)")
-	}
-	sess2, exists := tSession2.Sessions["session_broadcast"]
+	sess2, exists := updateState2.Sessions["session_broadcast"]
 	if !exists {
 		t.Fatal("client 2 did not receive the update (no session_broadcast)")
 	}

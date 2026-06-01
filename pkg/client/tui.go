@@ -21,8 +21,7 @@ import (
 type NodeType int
 
 const (
-	NodeTypeTmuxSession NodeType = iota
-	NodeTypeAgentSession
+	NodeTypeAgentSession NodeType = iota
 	NodeTypeSubagent
 )
 
@@ -45,19 +44,13 @@ type AgentSessionState struct {
 	GitBranch          string                    `json:"gitBranch,omitempty"`
 	Model              string                    `json:"model,omitempty"`
 	Status             string                    `json:"status"` // derived status e.g. "idle", "thinking", "awaiting-permission", etc.
-	LastEventTimestamp time.Time                 `json:"lastEventTimestamp"`
+	LastActivity       time.Time                 `json:"lastActivity"`
 	Subagents          map[string]*SubagentState `json:"subagents,omitempty"`
 }
 
-// TmuxSessionState groups agent sessions by tmux session
-type TmuxSessionState struct {
-	Name     string                        `json:"name"`
-	Sessions map[string]*AgentSessionState `json:"sessions"`
-}
-
-// StateTree represents the full aggregated state tree broadcasted by the daemon
+// StateTree represents the flat aggregated state list broadcasted by the daemon
 type StateTree struct {
-	TmuxSessions map[string]*TmuxSessionState `json:"tmuxSessions"`
+	Sessions map[string]*AgentSessionState `json:"sessions"`
 }
 
 // FlattenedNode represents a single visible row in our tree view
@@ -68,7 +61,6 @@ type FlattenedNode struct {
 	Expanded        bool
 	HasChildren     bool
 	Label           string
-	TmuxSessionName string
 	AgentSession    *AgentSessionState
 	Subagent        *SubagentState
 	Parent          *FlattenedNode
@@ -80,6 +72,7 @@ type Model struct {
 	Connected      bool
 	UdsPath        string
 	SelectedIndex  int
+	SelectedNodeID string // Persistent selection by node ID
 	FlattenedNodes []*FlattenedNode
 	ExpandedNodes  map[string]bool // ID -> expanded status
 	Width          int
@@ -108,15 +101,15 @@ func NewModel(udsPath string, demoMode bool) *Model {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Model{
 		State: StateTree{
-			TmuxSessions: make(map[string]*TmuxSessionState),
+			Sessions: make(map[string]*AgentSessionState),
 		},
 		Connected:     false,
 		UdsPath:       udsPath,
 		SelectedIndex: 0,
 		ExpandedNodes: map[string]bool{
 			// Pre-expand sessions by default for a nice welcoming tree
-			"demo_tmux_hivemind": true,
-			"demo_tmux_web-app":  true,
+			"session_session_parent_01": true,
+			"session_session_parent_03": true,
 		},
 		DemoMode:      demoMode,
 		udsChan:       make(chan tea.Msg, 10),
@@ -158,12 +151,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.SelectedIndex > 0 {
 				m.SelectedIndex--
+				m.SelectedNodeID = m.FlattenedNodes[m.SelectedIndex].ID
 			}
 			return m, nil
 
 		case "down", "j":
 			if m.SelectedIndex < len(m.FlattenedNodes)-1 {
 				m.SelectedIndex++
+				m.SelectedNodeID = m.FlattenedNodes[m.SelectedIndex].ID
 			}
 			return m, nil
 
@@ -294,114 +289,97 @@ func (m *Model) jumpToSelectedTmuxPane() tea.Cmd {
 	}
 }
 
-// rebuildTree converts our hierarchical StateTree into a flat list of visible nodes
+// rebuildTree converts our flat StateTree into a list of visible nodes
 func (m *Model) rebuildTree() {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	var newNodes []*FlattenedNode
 
-	// Sort tmux sessions by name for stable ordering
-	var tmuxNames []string
-	for k := range m.State.TmuxSessions {
-		tmuxNames = append(tmuxNames, k)
+	// Sort sessions by ID for stable ordering
+	var sessionKeys []string
+	for k := range m.State.Sessions {
+		sessionKeys = append(sessionKeys, k)
 	}
-	sort.Strings(tmuxNames)
+	sort.Strings(sessionKeys)
 
-	for _, tName := range tmuxNames {
-		tSession := m.State.TmuxSessions[tName]
-		tNodeID := "tmux_" + tName
-		tExpanded := m.ExpandedNodes[tNodeID]
-		hasAgents := len(tSession.Sessions) > 0
+	for _, sKey := range sessionKeys {
+		session := m.State.Sessions[sKey]
+		sNodeID := "session_" + session.SessionID
+		sExpanded := m.ExpandedNodes[sNodeID]
+		hasSubagents := len(session.Subagents) > 0
 
-		tmuxNode := &FlattenedNode{
-			ID:              tNodeID,
-			Type:            NodeTypeTmuxSession,
-			Depth:           0,
-			Expanded:        tExpanded,
-			HasChildren:     hasAgents,
-			Label:           tName,
-			TmuxSessionName: tName,
+		sessionNode := &FlattenedNode{
+			ID:          sNodeID,
+			Type:        NodeTypeAgentSession,
+			Depth:       0,
+			Expanded:    sExpanded,
+			HasChildren: hasSubagents,
+			Label:       fmt.Sprintf("Pane %s (%s)", session.TmuxPaneID, session.Model),
+			AgentSession: session,
 		}
-		newNodes = append(newNodes, tmuxNode)
+		newNodes = append(newNodes, sessionNode)
 
-		if tExpanded && hasAgents {
-			// Sort parent sessions by window/pane indices
-			var sessionKeys []string
-			for k := range tSession.Sessions {
-				sessionKeys = append(sessionKeys, k)
+		if sExpanded && hasSubagents {
+			// Sort subagents by spawned timestamp
+			var subagentIDs []string
+			for k := range session.Subagents {
+				subagentIDs = append(subagentIDs, k)
 			}
-			sort.Slice(sessionKeys, func(i, j int) bool {
-				s1 := tSession.Sessions[sessionKeys[i]]
-				s2 := tSession.Sessions[sessionKeys[j]]
-				if s1.TmuxWindow != s2.TmuxWindow {
-					return s1.TmuxWindow < s2.TmuxWindow
-				}
-				return s1.TmuxPaneID < s2.TmuxPaneID
+			sort.Slice(subagentIDs, func(i, j int) bool {
+				sa1 := session.Subagents[subagentIDs[i]]
+				sa2 := session.Subagents[subagentIDs[j]]
+				return sa1.SpawnedAt.Before(sa2.SpawnedAt)
 			})
 
-			for _, sKey := range sessionKeys {
-				session := tSession.Sessions[sKey]
-				sNodeID := "session_" + session.SessionID
-				sExpanded := m.ExpandedNodes[sNodeID]
-				hasSubagents := len(session.Subagents) > 0
+			for _, saID := range subagentIDs {
+				sa := session.Subagents[saID]
+				saNodeID := "subagent_" + session.SessionID + "_" + sa.ID
 
-				sessionNode := &FlattenedNode{
-					ID:              sNodeID,
-					Type:            NodeTypeAgentSession,
-					Depth:           1,
-					Expanded:        sExpanded,
-					HasChildren:     hasSubagents,
-					Label:           fmt.Sprintf("Pane %s (%s)", session.TmuxPaneID, session.Model),
-					TmuxSessionName: tName,
-					AgentSession:    session,
+				subagentNode := &FlattenedNode{
+					ID:          saNodeID,
+					Type:        NodeTypeSubagent,
+					Depth:       1,
+					Expanded:    false,
+					HasChildren: false,
+					Label:       sa.Role,
+					AgentSession: session,
+					Subagent:    sa,
 				}
-				newNodes = append(newNodes, sessionNode)
-
-				if sExpanded && hasSubagents {
-					// Sort subagents by spawned timestamp
-					var subagentIDs []string
-					for k := range session.Subagents {
-						subagentIDs = append(subagentIDs, k)
-					}
-					sort.Slice(subagentIDs, func(i, j int) bool {
-						sa1 := session.Subagents[subagentIDs[i]]
-						sa2 := session.Subagents[subagentIDs[j]]
-						return sa1.SpawnedAt.Before(sa2.SpawnedAt)
-					})
-
-					for _, saID := range subagentIDs {
-						sa := session.Subagents[saID]
-						saNodeID := "subagent_" + session.SessionID + "_" + sa.ID
-						
-						subagentNode := &FlattenedNode{
-							ID:              saNodeID,
-							Type:            NodeTypeSubagent,
-							Depth:           2,
-							Expanded:        false,
-							HasChildren:     false,
-							Label:           sa.Role,
-							TmuxSessionName: tName,
-							AgentSession:    session,
-							Subagent:        sa,
-						}
-						// Track parent so subagents can find parent pane coordinates
-						subagentNode.Parent = sessionNode
-						newNodes = append(newNodes, subagentNode)
-					}
-				}
+				subagentNode.Parent = sessionNode
+				newNodes = append(newNodes, subagentNode)
 			}
 		}
 	}
 
 	m.FlattenedNodes = newNodes
-	
-	// Bounds check selected index
-	if m.SelectedIndex >= len(m.FlattenedNodes) {
-		m.SelectedIndex = len(m.FlattenedNodes) - 1
+
+	// Restore selected index from persistent SelectedNodeID if possible
+	found := false
+	if m.SelectedNodeID != "" {
+		for idx, node := range m.FlattenedNodes {
+			if node.ID == m.SelectedNodeID {
+				m.SelectedIndex = idx
+				found = true
+				break
+			}
+		}
 	}
-	if m.SelectedIndex < 0 {
-		m.SelectedIndex = 0
+
+	if !found {
+		// Fallback to bounds checks
+		if m.SelectedIndex >= len(m.FlattenedNodes) {
+			m.SelectedIndex = len(m.FlattenedNodes) - 1
+		}
+		if m.SelectedIndex < 0 {
+			m.SelectedIndex = 0
+		}
+		// Update SelectedNodeID to match
+		if len(m.FlattenedNodes) > 0 {
+			m.SelectedNodeID = m.FlattenedNodes[m.SelectedIndex].ID
+		} else {
+			m.SelectedNodeID = ""
+		}
 	}
 }
 
@@ -417,13 +395,6 @@ func (m *Model) listenToUDS() {
 		default:
 			// Connect to socket
 			conn, err = net.Dial("unix", m.UdsPath)
-			if err != nil {
-				// Try fallback if primary fails
-				fallbackPath := "/tmp/hivemind.sock"
-				if m.UdsPath != fallbackPath {
-					conn, err = net.Dial("unix", fallbackPath)
-				}
-			}
 
 			if err != nil {
 				m.udsChan <- udsDisconnectMsg{err: err}
@@ -502,99 +473,89 @@ func (m *Model) loadDemoData() {
 	now := time.Now()
 	
 	m.State = StateTree{
-		TmuxSessions: map[string]*TmuxSessionState{
-			"hivemind": {
-				Name: "hivemind",
-				Sessions: map[string]*AgentSessionState{
-					"session_parent_01": {
-						SessionID:          "session_parent_01",
-						TmuxPaneID:         "%1",
-						TmuxSession:        "hivemind",
-						TmuxWindow:         "1",
-						Cwd:                "/Users/jacobmiller22/projects/hivemind",
-						GitBranch:          "feature/tui-client",
-						Model:              "Gemini 1.5 Pro",
-						Status:             "awaiting-permission",
-						LastEventTimestamp: now.Add(-45 * time.Second),
-						Subagents: map[string]*SubagentState{
-							"sub_sa_01": {
-								ID:        "sub_sa_01",
-								Role:      "Codebase Researcher",
-								TypeName:  "self",
-								Status:    "running",
-								SpawnedAt: now.Add(-5 * time.Minute),
-							},
-							"sub_sa_02": {
-								ID:        "sub_sa_02",
-								Role:      "Database Debugger",
-								TypeName:  "db_helper",
-								Status:    "completed",
-								SpawnedAt: now.Add(-12 * time.Minute),
-							},
-						},
+		Sessions: map[string]*AgentSessionState{
+			"session_parent_01": {
+				SessionID:          "session_parent_01",
+				TmuxPaneID:         "%1",
+				TmuxSession:        "hivemind",
+				TmuxWindow:         "1",
+				Cwd:                "/Users/jacobmiller22/projects/hivemind",
+				GitBranch:          "feature/tui-client",
+				Model:              "Gemini 1.5 Pro",
+				Status:             "awaiting-permission",
+				LastActivity:       now.Add(-45 * time.Second),
+				Subagents: map[string]*SubagentState{
+					"sub_sa_01": {
+						ID:        "sub_sa_01",
+						Role:      "Codebase Researcher",
+						TypeName:  "self",
+						Status:    "running",
+						SpawnedAt: now.Add(-5 * time.Minute),
 					},
-					"session_parent_02": {
-						SessionID:          "session_parent_02",
-						TmuxPaneID:         "%3",
-						TmuxSession:        "hivemind",
-						TmuxWindow:         "2",
-						Cwd:                "/Users/jacobmiller22/projects/hivemind/src/hooks",
-						GitBranch:          "feature/tui-client",
-						Model:              "Gemini 1.5 Flash",
-						Status:             "thinking",
-						LastEventTimestamp: now.Add(-5 * time.Second),
-						Subagents:          make(map[string]*SubagentState),
+					"sub_sa_02": {
+						ID:        "sub_sa_02",
+						Role:      "Database Debugger",
+						TypeName:  "db_helper",
+						Status:    "completed",
+						SpawnedAt: now.Add(-12 * time.Minute),
 					},
 				},
 			},
-			"web-app": {
-				Name: "web-app",
-				Sessions: map[string]*AgentSessionState{
-					"session_parent_03": {
-						SessionID:          "session_parent_03",
-						TmuxPaneID:         "%12",
-						TmuxSession:        "web-app",
-						TmuxWindow:         "1",
-						Cwd:                "/Users/jacobmiller22/projects/nextjs-dashboard",
-						GitBranch:          "main",
-						Model:              "Gemini 1.5 Pro",
-						Status:             "tool-running",
-						LastEventTimestamp: now.Add(-12 * time.Second),
-						Subagents: map[string]*SubagentState{
-							"sub_sa_03": {
-								ID:        "sub_sa_03",
-								Role:      "CSS Styling Specialist",
-								TypeName:  "designer",
-								Status:    "running",
-								SpawnedAt: now.Add(-2 * time.Minute),
-							},
-						},
-					},
-					"session_parent_04": {
-						SessionID:          "session_parent_04",
-						TmuxPaneID:         "%15",
-						TmuxSession:        "web-app",
-						TmuxWindow:         "2",
-						Cwd:                "/Users/jacobmiller22/projects/nextjs-dashboard/api",
-						GitBranch:          "main",
-						Model:              "Gemini 1.5 Flash",
-						Status:             "idle",
-						LastEventTimestamp: now.Add(-3 * time.Minute),
-						Subagents:          make(map[string]*SubagentState),
-					},
-					"session_parent_05": {
-						SessionID:          "session_parent_05",
-						TmuxPaneID:         "%18",
-						TmuxSession:        "web-app",
-						TmuxWindow:         "3",
-						Cwd:                "/Users/jacobmiller22/projects/nextjs-dashboard/tests",
-						GitBranch:          "main",
-						Model:              "Claude 3.5 Sonnet",
-						Status:             "no-telemetry",
-						LastEventTimestamp: now.Add(-10 * time.Minute),
-						Subagents:          make(map[string]*SubagentState),
+			"session_parent_02": {
+				SessionID:          "session_parent_02",
+				TmuxPaneID:         "%3",
+				TmuxSession:        "hivemind",
+				TmuxWindow:         "2",
+				Cwd:                "/Users/jacobmiller22/projects/hivemind/src/hooks",
+				GitBranch:          "feature/tui-client",
+				Model:              "Gemini 1.5 Flash",
+				Status:             "thinking",
+				LastActivity:       now.Add(-5 * time.Second),
+				Subagents:          make(map[string]*SubagentState),
+			},
+			"session_parent_03": {
+				SessionID:          "session_parent_03",
+				TmuxPaneID:         "%12",
+				TmuxSession:        "web-app",
+				TmuxWindow:         "1",
+				Cwd:                "/Users/jacobmiller22/projects/nextjs-dashboard",
+				GitBranch:          "main",
+				Model:              "Gemini 1.5 Pro",
+				Status:             "tool-running",
+				LastActivity:       now.Add(-12 * time.Second),
+				Subagents: map[string]*SubagentState{
+					"sub_sa_03": {
+						ID:        "sub_sa_03",
+						Role:      "CSS Styling Specialist",
+						TypeName:  "designer",
+						Status:    "running",
+						SpawnedAt: now.Add(-2 * time.Minute),
 					},
 				},
+			},
+			"session_parent_04": {
+				SessionID:          "session_parent_04",
+				TmuxPaneID:         "%15",
+				TmuxSession:        "web-app",
+				TmuxWindow:         "2",
+				Cwd:                "/Users/jacobmiller22/projects/nextjs-dashboard/api",
+				GitBranch:          "main",
+				Model:              "Gemini 1.5 Flash",
+				Status:             "idle",
+				LastActivity:       now.Add(-3 * time.Minute),
+				Subagents:          make(map[string]*SubagentState),
+			},
+			"session_parent_05": {
+				SessionID:          "session_parent_05",
+				TmuxPaneID:         "%18",
+				TmuxSession:        "web-app",
+				TmuxWindow:         "3",
+				Cwd:                "/Users/jacobmiller22/projects/nextjs-dashboard/tests",
+				GitBranch:          "main",
+				Model:              "Claude 3.5 Sonnet",
+				Status:             "no-telemetry",
+				LastActivity:       now.Add(-10 * time.Minute),
+				Subagents:          make(map[string]*SubagentState),
 			},
 		},
 	}
@@ -602,16 +563,15 @@ func (m *Model) loadDemoData() {
 	m.LastUpdate = now
 }
 
-// animateDemoData makes statuses shift occasionally so the interface feels dynamic and alive!
 func (m *Model) animateDemoData() {
 	// Periodic random fluctuations
 	now := time.Now()
 	m.LastUpdate = now
 
 	// 1. Shift session 2 between "thinking", "tool-running", and "idle"
-	s2 := m.State.TmuxSessions["hivemind"].Sessions["session_parent_02"]
+	s2 := m.State.Sessions["session_parent_02"]
 	if s2 != nil {
-		s2.LastEventTimestamp = now
+		s2.LastActivity = now
 		switch s2.Status {
 		case "thinking":
 			s2.Status = "tool-running"
@@ -623,7 +583,7 @@ func (m *Model) animateDemoData() {
 	}
 
 	// 2. Add an elapsed second indicator or toggle a subagent status
-	s3 := m.State.TmuxSessions["web-app"].Sessions["session_parent_03"]
+	s3 := m.State.Sessions["session_parent_03"]
 	if s3 != nil {
 		sub := s3.Subagents["sub_sa_03"]
 		if sub != nil && now.Second()%20 == 0 {
