@@ -47,7 +47,11 @@ func main() {
 	case "mock-file", "run-mock-file-emitter":
 		runMockFileEmitter()
 	case "hook":
-		runHook(*udsFlag)
+		event := ""
+		if flag.NArg() > 1 {
+			event = flag.Arg(1)
+		}
+		runHook(*udsFlag, event)
 	case "help":
 		printHelp()
 	case "":
@@ -347,12 +351,7 @@ type AntigravityInput struct {
 	FullyIdle             bool                 `json:"fullyIdle,omitempty"`
 }
 
-func runHook(customUdsPath string) {
-	// 1. Get event name from arguments
-	event := ""
-	if flag.NArg() > 1 {
-		event = flag.Arg(1)
-	}
+func runHook(customUdsPath string, event string) {
 
 	// 2. Read stdin
 	stdinData, err := io.ReadAll(os.Stdin)
