@@ -250,8 +250,23 @@ func runClient(udsPath string, runDemo bool, restartDaemon bool) {
 					// Fallback to offline demo mode so the user still gets a working dashboard!
 					runDemoMode = true
 				} else {
-					// Wait a short duration to let the daemon UDS initialize
-					time.Sleep(300 * time.Millisecond)
+					// Poll the UNIX domain socket 'udsPath' until connection is established or timeout
+					start := time.Now()
+					timeout := 2000 * time.Millisecond
+					connected := false
+					for time.Since(start) < timeout {
+						conn, err := net.DialTimeout("unix", udsPath, 50*time.Millisecond)
+						if err == nil {
+							conn.Close()
+							connected = true
+							break
+						}
+						time.Sleep(30 * time.Millisecond)
+					}
+					if !connected {
+						fmt.Printf("Warning: Daemon auto-spawned, but UNIX domain socket did not become ready after %v. Degrading to demo mode.\n", timeout)
+						runDemoMode = true
+					}
 				}
 			} else {
 				connFallback.Close()

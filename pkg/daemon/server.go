@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+var conversationIDRegex = regexp.MustCompile(`(?i)"conversationId"\s*:\s*"([a-fA-F0-9\-]+)"`)
+
 
 // Server implements the Hivemind state daemon.
 type Server struct {
@@ -418,8 +422,9 @@ func (s *Server) SyncFileSessions() {
 	stateChanged := false
 
 	type parsedSession struct {
-		key string
-		fss FileSessionState
+		key     string
+		fss     FileSessionState
+		modTime time.Time
 	}
 
 	var parsed []parsedSession
@@ -428,7 +433,8 @@ func (s *Server) SyncFileSessions() {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(s.SessionsDir, entry.Name()))
+		filePath := filepath.Join(s.SessionsDir, entry.Name())
+		data, err := os.ReadFile(filePath)
 		if err != nil {
 			continue
 		}
@@ -438,9 +444,15 @@ func (s *Server) SyncFileSessions() {
 			continue
 		}
 
+		fileInfo, err := entry.Info()
+		modTime := now
+		if err == nil {
+			modTime = fileInfo.ModTime()
+		}
+
 		key := "file:" + fss.SessionID
 		seenIDs[key] = true
-		parsed = append(parsed, parsedSession{key: key, fss: fss})
+		parsed = append(parsed, parsedSession{key: key, fss: fss, modTime: modTime})
 	}
 
 	s.StateMu.Lock()
@@ -448,8 +460,28 @@ func (s *Server) SyncFileSessions() {
 
 	for _, p := range parsed {
 		fss := p.fss
+		modTime := p.modTime
 		session, exists := s.State.Sessions[p.key]
 		if exists {
+			// Align subagents to avoid spurious mismatch of SpawnedAt / CompletedAt
+			for _, sa := range fss.Subagents {
+				if oldSa, ok := session.Subagents[sa.ID]; ok {
+					sa.SpawnedAt = oldSa.SpawnedAt
+					if sa.Status == oldSa.Status {
+						sa.CompletedAt = oldSa.CompletedAt
+					} else if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
+						if sa.CompletedAt == nil {
+							sa.CompletedAt = &modTime
+						}
+					}
+				} else {
+					sa.SpawnedAt = modTime
+					if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
+						sa.CompletedAt = &modTime
+					}
+				}
+			}
+
 			changed := session.Status != fss.Status ||
 				session.Model != fss.Model ||
 				session.Cwd != fss.Cwd ||
@@ -457,7 +489,8 @@ func (s *Server) SyncFileSessions() {
 				session.TmuxPaneID != fss.TmuxPaneID ||
 				session.TmuxSession != fss.TmuxSession ||
 				session.TmuxWindow != fss.TmuxWindow ||
-				!subagentsEqual(session.Subagents, fss.Subagents)
+				!subagentsEqual(session.Subagents, fss.Subagents) ||
+				session.LastActivity.Before(modTime)
 
 			if changed {
 				session.Status = fss.Status
@@ -468,14 +501,21 @@ func (s *Server) SyncFileSessions() {
 				session.TmuxSession = fss.TmuxSession
 				session.TmuxWindow = fss.TmuxWindow
 				session.Subagents = fss.Subagents
-				session.LastActivity = now
-				session.LastEventReceived = now
+				session.LastActivity = modTime
+				session.LastEventReceived = modTime
 				stateChanged = true
 			}
 		} else {
 			subagents := fss.Subagents
 			if subagents == nil {
 				subagents = make(map[string]*Subagent)
+			}
+			// Align subagents for new session
+			for _, sa := range subagents {
+				sa.SpawnedAt = modTime
+				if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
+					sa.CompletedAt = &modTime
+				}
 			}
 			s.State.Sessions[p.key] = &SessionState{
 				SessionID:         fss.SessionID,
@@ -486,8 +526,8 @@ func (s *Server) SyncFileSessions() {
 				GitBranch:         fss.GitBranch,
 				Model:             fss.Model,
 				Status:            fss.Status,
-				LastActivity:      now,
-				LastEventReceived: now,
+				LastActivity:      modTime,
+				LastEventReceived: modTime,
 				Subagents:         subagents,
 			}
 			stateChanged = true
@@ -572,8 +612,9 @@ func (s *Server) SyncAntigravitySessions() {
 	stateChanged := false
 
 	type parsedSession struct {
-		key string
-		fss FileSessionState
+		key     string
+		fss     FileSessionState
+		modTime time.Time
 	}
 
 	var parsed []parsedSession
@@ -593,6 +634,12 @@ func (s *Server) SyncAntigravitySessions() {
 			}
 		}
 
+		info, err := os.Stat(transcriptPath)
+		modTime := now
+		if err == nil {
+			modTime = info.ModTime()
+		}
+
 		fss, err := s.parseTranscriptFile(transcriptPath, sessionID)
 		if err != nil {
 			continue
@@ -600,7 +647,7 @@ func (s *Server) SyncAntigravitySessions() {
 
 		key := "file:" + sessionID
 		seenIDs[key] = true
-		parsed = append(parsed, parsedSession{key: key, fss: *fss})
+		parsed = append(parsed, parsedSession{key: key, fss: *fss, modTime: modTime})
 	}
 
 	s.StateMu.Lock()
@@ -608,8 +655,28 @@ func (s *Server) SyncAntigravitySessions() {
 
 	for _, p := range parsed {
 		fss := p.fss
+		modTime := p.modTime
 		session, exists := s.State.Sessions[p.key]
 		if exists {
+			// Align subagents to avoid spurious mismatch of SpawnedAt / CompletedAt
+			for _, sa := range fss.Subagents {
+				if oldSa, ok := session.Subagents[sa.ID]; ok {
+					sa.SpawnedAt = oldSa.SpawnedAt
+					if sa.Status == oldSa.Status {
+						sa.CompletedAt = oldSa.CompletedAt
+					} else if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
+						if sa.CompletedAt == nil {
+							sa.CompletedAt = &modTime
+						}
+					}
+				} else {
+					sa.SpawnedAt = modTime
+					if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
+						sa.CompletedAt = &modTime
+					}
+				}
+			}
+
 			changed := session.Status != fss.Status ||
 				session.Model != fss.Model ||
 				session.Cwd != fss.Cwd ||
@@ -617,7 +684,8 @@ func (s *Server) SyncAntigravitySessions() {
 				session.TmuxPaneID != fss.TmuxPaneID ||
 				session.TmuxSession != fss.TmuxSession ||
 				session.TmuxWindow != fss.TmuxWindow ||
-				!subagentsEqual(session.Subagents, fss.Subagents)
+				!subagentsEqual(session.Subagents, fss.Subagents) ||
+				session.LastActivity.Before(modTime)
 
 			if changed {
 				session.Status = fss.Status
@@ -628,14 +696,21 @@ func (s *Server) SyncAntigravitySessions() {
 				session.TmuxSession = fss.TmuxSession
 				session.TmuxWindow = fss.TmuxWindow
 				session.Subagents = fss.Subagents
-				session.LastActivity = now
-				session.LastEventReceived = now
+				session.LastActivity = modTime
+				session.LastEventReceived = modTime
 				stateChanged = true
 			}
 		} else {
 			subagents := fss.Subagents
 			if subagents == nil {
 				subagents = make(map[string]*Subagent)
+			}
+			// Align subagents for new session
+			for _, sa := range subagents {
+				sa.SpawnedAt = modTime
+				if sa.Status == SubagentCompleted || sa.Status == SubagentErrored {
+					sa.CompletedAt = &modTime
+				}
 			}
 			s.State.Sessions[p.key] = &SessionState{
 				SessionID:         fss.SessionID,
@@ -646,8 +721,8 @@ func (s *Server) SyncAntigravitySessions() {
 				GitBranch:         fss.GitBranch,
 				Model:             fss.Model,
 				Status:            fss.Status,
-				LastActivity:      now,
-				LastEventReceived: now,
+				LastActivity:      modTime,
+				LastEventReceived: modTime,
 				Subagents:         subagents,
 			}
 			stateChanged = true
@@ -743,23 +818,43 @@ func (s *Server) parseTranscriptFile(path string, sessionID string) (*FileSessio
 		if line.Type == "PLANNER_RESPONSE" && len(line.ToolCalls) > 0 {
 			for _, tc := range line.ToolCalls {
 				if tc.Name == "invoke_subagent" {
-					var args struct {
-						Subagents []struct {
-							Role     string `json:"Role"`
-							TypeName string `json:"TypeName"`
-						} `json:"Subagents"`
+					type SubagentArg struct {
+						Role     string `json:"Role"`
+						TypeName string `json:"TypeName"`
 					}
-					
-					// Robust dual-unmarshaling to support both raw JSON objects and double-serialized strings
-					err := json.Unmarshal(tc.Args, &args)
-					if err != nil {
+					var sas []SubagentArg
+
+					// 1. Try to unmarshal as direct struct first (raw JSON array)
+					var args struct {
+						Subagents []SubagentArg `json:"Subagents"`
+					}
+					if err := json.Unmarshal(tc.Args, &args); err == nil && len(args.Subagents) > 0 {
+						sas = args.Subagents
+					} else {
+						// 2. Try to unmarshal tc.Args as a string representing the entire JSON object, or directly as an object
 						var argsStr string
+						var parsedObj map[string]json.RawMessage
 						if json.Unmarshal(tc.Args, &argsStr) == nil {
-							_ = json.Unmarshal([]byte(argsStr), &args)
+							_ = json.Unmarshal([]byte(argsStr), &parsedObj)
+						} else {
+							_ = json.Unmarshal(tc.Args, &parsedObj)
+						}
+
+						if parsedObj != nil {
+							if subagentsRaw, ok := parsedObj["Subagents"]; ok {
+								// 3. Try to unmarshal the raw field as an array
+								if err := json.Unmarshal(subagentsRaw, &sas); err != nil {
+									// 4. Try to unmarshal the raw field as a string containing the array
+									var subagentsStr string
+									if json.Unmarshal(subagentsRaw, &subagentsStr) == nil {
+										_ = json.Unmarshal([]byte(subagentsStr), &sas)
+									}
+								}
+							}
 						}
 					}
 
-					for idx, sa := range args.Subagents {
+					for idx, sa := range sas {
 						saID := fmt.Sprintf("sub_%d_%d", line.StepIndex, idx)
 						subagentsByStep[line.StepIndex] = append(subagentsByStep[line.StepIndex], saID)
 						fss.Subagents[saID] = &Subagent{
@@ -776,16 +871,51 @@ func (s *Server) parseTranscriptFile(path string, sessionID string) (*FileSessio
 
 		// Mark subagents as completed when the INVOKE_SUBAGENT tool execution returns
 		if line.Type == "INVOKE_SUBAGENT" && line.Status == "DONE" {
-			// Find the parent planner response that spawned it (usually previous steps)
-			// For robustness, we check the spawned subagents from previous steps and mark them as completed
-			for stepIdx, saIDs := range subagentsByStep {
-				if stepIdx < line.StepIndex {
-					for _, saID := range saIDs {
-						if sa, exists := fss.Subagents[saID]; exists && sa.Status == SubagentRunning {
-							sa.Status = SubagentCompleted
-							completedAt := time.Now()
-							sa.CompletedAt = &completedAt
+			// Extract conversationId (child UUID) if present
+			var childUUID string
+			matches := conversationIDRegex.FindStringSubmatch(line.Content)
+			if len(matches) > 1 {
+				childUUID = matches[1]
+			}
+
+			// Find the temporary subagent ID that corresponds to this tool execution.
+			// The tool call was at some step S < line.StepIndex. We look for the most recent
+			// subagent with ID format "sub_S_idx".
+			var targetTempID string
+			maxStep := -1
+			for saID := range fss.Subagents {
+				if strings.HasPrefix(saID, "sub_") {
+					var s, idx int
+					if _, err := fmt.Sscanf(saID, "sub_%d_%d", &s, &idx); err == nil {
+						if s < line.StepIndex && s > maxStep {
+							maxStep = s
+							targetTempID = saID
 						}
+					}
+				}
+			}
+
+			if targetTempID != "" {
+				sa := fss.Subagents[targetTempID]
+				// If we extracted a real child UUID, we link/rename it!
+				if childUUID != "" {
+					delete(fss.Subagents, targetTempID)
+					sa.ID = childUUID
+					fss.Subagents[childUUID] = sa
+				}
+				
+				// Mark as completed since the tool returned DONE
+				sa.Status = SubagentCompleted
+				completedAt := time.Now()
+				sa.CompletedAt = &completedAt
+			} else {
+				// Fallback: if no temporary subagent was found, but we have a childUUID,
+				// still ensure we have it registered as completed
+				if childUUID != "" {
+					if sa, exists := fss.Subagents[childUUID]; exists {
+						sa.Status = SubagentCompleted
+						completedAt := time.Now()
+						sa.CompletedAt = &completedAt
 					}
 				}
 			}
