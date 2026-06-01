@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+var conversationIDRegex = regexp.MustCompile(`(?i)"conversationId"\s*:\s*"([a-fA-F0-9\-]+)"`)
+
 
 // Server implements the Hivemind state daemon.
 type Server struct {
@@ -814,23 +818,43 @@ func (s *Server) parseTranscriptFile(path string, sessionID string) (*FileSessio
 		if line.Type == "PLANNER_RESPONSE" && len(line.ToolCalls) > 0 {
 			for _, tc := range line.ToolCalls {
 				if tc.Name == "invoke_subagent" {
-					var args struct {
-						Subagents []struct {
-							Role     string `json:"Role"`
-							TypeName string `json:"TypeName"`
-						} `json:"Subagents"`
+					type SubagentArg struct {
+						Role     string `json:"Role"`
+						TypeName string `json:"TypeName"`
 					}
-					
-					// Robust dual-unmarshaling to support both raw JSON objects and double-serialized strings
-					err := json.Unmarshal(tc.Args, &args)
-					if err != nil {
+					var sas []SubagentArg
+
+					// 1. Try to unmarshal as direct struct first (raw JSON array)
+					var args struct {
+						Subagents []SubagentArg `json:"Subagents"`
+					}
+					if err := json.Unmarshal(tc.Args, &args); err == nil && len(args.Subagents) > 0 {
+						sas = args.Subagents
+					} else {
+						// 2. Try to unmarshal tc.Args as a string representing the entire JSON object, or directly as an object
 						var argsStr string
+						var parsedObj map[string]json.RawMessage
 						if json.Unmarshal(tc.Args, &argsStr) == nil {
-							_ = json.Unmarshal([]byte(argsStr), &args)
+							_ = json.Unmarshal([]byte(argsStr), &parsedObj)
+						} else {
+							_ = json.Unmarshal(tc.Args, &parsedObj)
+						}
+
+						if parsedObj != nil {
+							if subagentsRaw, ok := parsedObj["Subagents"]; ok {
+								// 3. Try to unmarshal the raw field as an array
+								if err := json.Unmarshal(subagentsRaw, &sas); err != nil {
+									// 4. Try to unmarshal the raw field as a string containing the array
+									var subagentsStr string
+									if json.Unmarshal(subagentsRaw, &subagentsStr) == nil {
+										_ = json.Unmarshal([]byte(subagentsStr), &sas)
+									}
+								}
+							}
 						}
 					}
 
-					for idx, sa := range args.Subagents {
+					for idx, sa := range sas {
 						saID := fmt.Sprintf("sub_%d_%d", line.StepIndex, idx)
 						subagentsByStep[line.StepIndex] = append(subagentsByStep[line.StepIndex], saID)
 						fss.Subagents[saID] = &Subagent{
@@ -847,16 +871,51 @@ func (s *Server) parseTranscriptFile(path string, sessionID string) (*FileSessio
 
 		// Mark subagents as completed when the INVOKE_SUBAGENT tool execution returns
 		if line.Type == "INVOKE_SUBAGENT" && line.Status == "DONE" {
-			// Find the parent planner response that spawned it (usually previous steps)
-			// For robustness, we check the spawned subagents from previous steps and mark them as completed
-			for stepIdx, saIDs := range subagentsByStep {
-				if stepIdx < line.StepIndex {
-					for _, saID := range saIDs {
-						if sa, exists := fss.Subagents[saID]; exists && sa.Status == SubagentRunning {
-							sa.Status = SubagentCompleted
-							completedAt := time.Now()
-							sa.CompletedAt = &completedAt
+			// Extract conversationId (child UUID) if present
+			var childUUID string
+			matches := conversationIDRegex.FindStringSubmatch(line.Content)
+			if len(matches) > 1 {
+				childUUID = matches[1]
+			}
+
+			// Find the temporary subagent ID that corresponds to this tool execution.
+			// The tool call was at some step S < line.StepIndex. We look for the most recent
+			// subagent with ID format "sub_S_idx".
+			var targetTempID string
+			maxStep := -1
+			for saID := range fss.Subagents {
+				if strings.HasPrefix(saID, "sub_") {
+					var s, idx int
+					if _, err := fmt.Sscanf(saID, "sub_%d_%d", &s, &idx); err == nil {
+						if s < line.StepIndex && s > maxStep {
+							maxStep = s
+							targetTempID = saID
 						}
+					}
+				}
+			}
+
+			if targetTempID != "" {
+				sa := fss.Subagents[targetTempID]
+				// If we extracted a real child UUID, we link/rename it!
+				if childUUID != "" {
+					delete(fss.Subagents, targetTempID)
+					sa.ID = childUUID
+					fss.Subagents[childUUID] = sa
+				}
+				
+				// Mark as completed since the tool returned DONE
+				sa.Status = SubagentCompleted
+				completedAt := time.Now()
+				sa.CompletedAt = &completedAt
+			} else {
+				// Fallback: if no temporary subagent was found, but we have a childUUID,
+				// still ensure we have it registered as completed
+				if childUUID != "" {
+					if sa, exists := fss.Subagents[childUUID]; exists {
+						sa.Status = SubagentCompleted
+						completedAt := time.Now()
+						sa.CompletedAt = &completedAt
 					}
 				}
 			}
