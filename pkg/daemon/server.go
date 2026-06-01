@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os/exec"
 	"regexp"
@@ -87,7 +88,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 // HandleConnection handles a single client or hook adapter connection.
 func (s *Server) HandleConnection(conn net.Conn) {
-	defer conn.Close()
+	fmt.Printf("[DEBUG] HandleConnection: Accepted new connection from %v\n", conn.RemoteAddr())
+	defer func() {
+		fmt.Printf("[DEBUG] HandleConnection: Closing connection from %v\n", conn.RemoteAddr())
+		conn.Close()
+	}()
 	scanner := bufio.NewScanner(conn)
 
 	var isSubscriber bool
@@ -95,6 +100,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 
 	defer func() {
 		if isSubscriber {
+			fmt.Printf("[DEBUG] HandleConnection: Unsubscribing client %v\n", conn.RemoteAddr())
 			s.SubscribersMu.Lock()
 			delete(s.Subscribers, subChan)
 			s.SubscribersMu.Unlock()
@@ -107,16 +113,20 @@ func (s *Server) HandleConnection(conn net.Conn) {
 			continue
 		}
 
+		fmt.Printf("[DEBUG] HandleConnection: Received payload: %s\n", string(line))
+
 		// Check if it's a subscribe request or a telemetry event
 		var msg struct {
 			Type      string `json:"type"`
 			SessionID string `json:"sessionId"`
 		}
 		if err := json.Unmarshal(line, &msg); err != nil {
+			fmt.Printf("[DEBUG] HandleConnection: JSON unmarshal error (preliminary check): %v\n", err)
 			continue
 		}
 
 		if msg.Type == "subscribe" {
+			fmt.Printf("[DEBUG] HandleConnection: Client subscribing from %v\n", conn.RemoteAddr())
 			isSubscriber = true
 			subChan = make(chan []byte, 100)
 
@@ -137,6 +147,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 				for data := range subChan {
 					_, err := conn.Write(append(data, '\n'))
 					if err != nil {
+						fmt.Printf("[DEBUG] HandleConnection: Subscription write error for %v: %v\n", conn.RemoteAddr(), err)
 						_ = conn.Close()
 						return
 					}
@@ -149,19 +160,23 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		// Otherwise, process as a HivemindEvent
 		var event HivemindEvent
 		if err := json.Unmarshal(line, &event); err != nil {
+			fmt.Printf("[DEBUG] HandleConnection: JSON unmarshal error (HivemindEvent): %v\n", err)
 			continue
 		}
 
+		fmt.Printf("[DEBUG] HandleConnection: Processing event type %q, sessionId %q, eventType %q\n", event.Type, event.SessionID, event.EventType)
 		s.processEvent(&event)
 	}
 }
 
 // processEvent applies a lifecycle event to the session state tree.
 func (s *Server) processEvent(event *HivemindEvent) {
+	fmt.Printf("[DEBUG] processEvent: SessionID=%q, EventType=%q, Status=%q\n", event.SessionID, event.EventType, event.Payload.Status)
 	s.StateMu.Lock()
 	defer s.StateMu.Unlock()
 
 	if event.SessionID == "" {
+		fmt.Printf("[DEBUG] processEvent: SessionID is empty, skipping\n")
 		return
 	}
 
@@ -363,6 +378,8 @@ func (s *Server) broadcastStateLocked() {
 	if err != nil {
 		return
 	}
+
+	fmt.Printf("[DEBUG] broadcastStateLocked: Broadcasting state to %d active subscribers\n", len(s.Subscribers))
 
 	s.SubscribersMu.Lock()
 	defer s.SubscribersMu.Unlock()
