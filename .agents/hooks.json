@@ -5,7 +5,7 @@
         "matcher": "*",
         "hooks": [
           {
-            "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PreToolUse"
+            "command": "/Users/jacobmiller22/projects/hivemind/hivemind event PreToolUse"
           }
         ]
       }
@@ -15,24 +15,24 @@
         "matcher": "*",
         "hooks": [
           {
-            "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PostToolUse"
+            "command": "/Users/jacobmiller22/projects/hivemind/hivemind event PostToolUse"
           }
         ]
       }
     ],
     "PreInvocation": [
       {
-        "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PreInvocation"
+        "command": "/Users/jacobmiller22/projects/hivemind/hivemind event PreInvocation"
       }
     ],
     "PostInvocation": [
       {
-        "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook PostInvocation"
+        "command": "/Users/jacobmiller22/projects/hivemind/hivemind event PostInvocation"
       }
     ],
     "Stop": [
       {
-        "command": "/Users/jacobmiller22/projects/hivemind/hivemind hook Stop"
+        "command": "/Users/jacobmiller22/projects/hivemind/hivemind event Stop"
       }
     ]
   }

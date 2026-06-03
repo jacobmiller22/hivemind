@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
+	"log"
 	"net"
 	"os/exec"
 	"regexp"
@@ -15,16 +15,15 @@ import (
 
 var conversationIDRegex = regexp.MustCompile(`(?i)"conversationId"\s*:\s*"([a-fA-F0-9\-]+)"`)
 
-
 // Server implements the Hivemind state daemon.
 type Server struct {
-	State              *StateTree
-	StateMu            sync.Mutex
-	Subscribers        map[chan []byte]bool
-	SubscribersMu      sync.Mutex
+	State         *StateTree
+	StateMu       sync.Mutex
+	Subscribers   map[chan []byte]bool
+	SubscribersMu sync.Mutex
 
 	// New Tool Adapter Fields
-	Adapters           []ToolAdapter
+	Adapters []ToolAdapter
 
 	// Configuration for cool-off windows
 	SubagentCoolOff time.Duration
@@ -40,14 +39,12 @@ func NewServer() *Server {
 		State: &StateTree{
 			Sessions: make(map[string]*SessionState),
 		},
-		Subscribers:      make(map[chan []byte]bool),
-		SubagentCoolOff:  30 * time.Second,
-		SessionCoolOff:   30 * time.Second,
-		ListPanesFunc:    DefaultListPanes,
+		Subscribers:     make(map[chan []byte]bool),
+		SubagentCoolOff: 30 * time.Second,
+		SessionCoolOff:  30 * time.Second,
+		ListPanesFunc:   DefaultListPanes,
 	}
 }
-
-
 
 // DefaultListPanes queries tmux for all active pane IDs.
 func DefaultListPanes() ([]string, error) {
@@ -68,8 +65,6 @@ func DefaultListPanes() ([]string, error) {
 	return panes, nil
 }
 
-
-
 // Start runs the server's main UDS acceptance loop and the tmux polling ticker.
 func (s *Server) Start(ctx context.Context) error {
 	// Start background tmux polling and pruning routine
@@ -88,9 +83,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 // HandleConnection handles a single client or hook adapter connection.
 func (s *Server) HandleConnection(conn net.Conn) {
-	fmt.Printf("[DEBUG] HandleConnection: Accepted new connection from %v\n", conn.RemoteAddr())
+	log.Printf("[DEBUG] HandleConnection: Accepted new connection from %v\n", conn.RemoteAddr())
 	defer func() {
-		fmt.Printf("[DEBUG] HandleConnection: Closing connection from %v\n", conn.RemoteAddr())
+		log.Printf("[DEBUG] HandleConnection: Closing connection from %v\n", conn.RemoteAddr())
 		conn.Close()
 	}()
 	scanner := bufio.NewScanner(conn)
@@ -100,7 +95,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 
 	defer func() {
 		if isSubscriber {
-			fmt.Printf("[DEBUG] HandleConnection: Unsubscribing client %v\n", conn.RemoteAddr())
+			log.Printf("[DEBUG] HandleConnection: Unsubscribing client %v\n", conn.RemoteAddr())
 			s.SubscribersMu.Lock()
 			delete(s.Subscribers, subChan)
 			s.SubscribersMu.Unlock()
@@ -113,7 +108,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 			continue
 		}
 
-		fmt.Printf("[DEBUG] HandleConnection: Received payload: %s\n", string(line))
+		log.Printf("[DEBUG] HandleConnection: Received payload: %s\n", string(line))
 
 		// Check if it's a subscribe request or a telemetry event
 		var msg struct {
@@ -121,12 +116,12 @@ func (s *Server) HandleConnection(conn net.Conn) {
 			SessionID string `json:"sessionId"`
 		}
 		if err := json.Unmarshal(line, &msg); err != nil {
-			fmt.Printf("[DEBUG] HandleConnection: JSON unmarshal error (preliminary check): %v\n", err)
+			log.Printf("[DEBUG] HandleConnection: JSON unmarshal error (preliminary check): %v\n", err)
 			continue
 		}
 
 		if msg.Type == "subscribe" {
-			fmt.Printf("[DEBUG] HandleConnection: Client subscribing from %v\n", conn.RemoteAddr())
+			log.Printf("[DEBUG] HandleConnection: Client subscribing from %v\n", conn.RemoteAddr())
 			isSubscriber = true
 			subChan = make(chan []byte, 100)
 
@@ -147,7 +142,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 				for data := range subChan {
 					_, err := conn.Write(append(data, '\n'))
 					if err != nil {
-						fmt.Printf("[DEBUG] HandleConnection: Subscription write error for %v: %v\n", conn.RemoteAddr(), err)
+						log.Printf("[DEBUG] HandleConnection: Subscription write error for %v: %v\n", conn.RemoteAddr(), err)
 						_ = conn.Close()
 						return
 					}
@@ -160,23 +155,23 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		// Otherwise, process as a HivemindEvent
 		var event HivemindEvent
 		if err := json.Unmarshal(line, &event); err != nil {
-			fmt.Printf("[DEBUG] HandleConnection: JSON unmarshal error (HivemindEvent): %v\n", err)
+			log.Printf("[DEBUG] HandleConnection: JSON unmarshal error (HivemindEvent): %v\n", err)
 			continue
 		}
 
-		fmt.Printf("[DEBUG] HandleConnection: Processing event type %q, sessionId %q, eventType %q\n", event.Type, event.SessionID, event.EventType)
+		log.Printf("[DEBUG] HandleConnection: Processing event type %q, sessionId %q, eventType %q\n", event.Type, event.SessionID, event.EventType)
 		s.processEvent(&event)
 	}
 }
 
 // processEvent applies a lifecycle event to the session state tree.
 func (s *Server) processEvent(event *HivemindEvent) {
-	fmt.Printf("[DEBUG] processEvent: SessionID=%q, EventType=%q, Status=%q\n", event.SessionID, event.EventType, event.Payload.Status)
+	log.Printf("[DEBUG] processEvent: SessionID=%q, EventType=%q, Status=%q\n", event.SessionID, event.EventType, event.Payload.Status)
 	s.StateMu.Lock()
 	defer s.StateMu.Unlock()
 
 	if event.SessionID == "" {
-		fmt.Printf("[DEBUG] processEvent: SessionID is empty, skipping\n")
+		log.Printf("[DEBUG] processEvent: SessionID is empty, skipping\n")
 		return
 	}
 
@@ -370,8 +365,6 @@ func (s *Server) SyncTmuxAndPrune() {
 	}
 }
 
-
-
 // broadcastStateLocked serializes and streams the updated StateTree to all open subscribers.
 func (s *Server) broadcastStateLocked() {
 	stateJSON, err := json.Marshal(s.State)
@@ -379,7 +372,7 @@ func (s *Server) broadcastStateLocked() {
 		return
 	}
 
-	fmt.Printf("[DEBUG] broadcastStateLocked: Broadcasting state to %d active subscribers\n", len(s.Subscribers))
+	log.Printf("[DEBUG] broadcastStateLocked: Broadcasting state to %d active subscribers\n", len(s.Subscribers))
 
 	s.SubscribersMu.Lock()
 	defer s.SubscribersMu.Unlock()
@@ -400,7 +393,6 @@ func (s *Server) GetState() *StateTree {
 	return s.State
 }
 
-
 // Close closes all active subscriber connections.
 func (s *Server) Close() error {
 	s.SubscribersMu.Lock()
@@ -412,8 +404,6 @@ func (s *Server) Close() error {
 	}
 	return nil
 }
-
-
 
 // BroadcastState serializes and streams the updated StateTree to all open subscribers.
 func (s *Server) BroadcastState() {
@@ -451,5 +441,3 @@ func SubagentsEqual(a, b map[string]*Subagent) bool {
 	}
 	return true
 }
-
-

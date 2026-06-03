@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -67,6 +68,7 @@ func ListenUDS(socketPath string) (net.Listener, string, error) {
 	// Remove existing socket file if it exists
 	_ = os.Remove(resolvedPath)
 
+	log.Printf("Listening on socket at %s", resolvedPath)
 	l, err := net.Listen("unix", resolvedPath)
 	if err != nil {
 		return nil, "", err

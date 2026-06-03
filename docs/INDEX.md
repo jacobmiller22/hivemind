@@ -16,6 +16,7 @@ The following documents define the various phases and aspects of the project. De
 | **Index & Guidelines** | [INDEX.md](file:///Users/jacobmiller22/projects/hivemind/docs/INDEX.md) | Central entry point, style guidelines, and compliance rules. | When adding new documentation categories or updating standards. |
 | **Product Requirements** | [PRD.md](file:///Users/jacobmiller22/projects/hivemind/docs/PRD.md) | High-level goals, user stories, personas, and functional requirements for MVP1 and MVP2. | When features are re-scoped, postponed, or new requirements are introduced. |
 | **Technical Design** | [DESIGN.md](file:///Users/jacobmiller22/projects/hivemind/docs/DESIGN.md) | Component architecture, communication protocols (UDS/JSON), schemas, and testing strategy. | Before writing code for any new component, interface change, or schema adjustment. |
+| **CLI Specification** | [CLI.md](file:///Users/jacobmiller22/projects/hivemind/docs/CLI.md) | Command hierarchy, flags, subcommands, and active telemetry usage instructions. | When adding new commands, changing option flags, or adjusting command layouts. |
 | **Project Backlog** | [BACKLOG.md](file:///Users/jacobmiller22/projects/hivemind/docs/BACKLOG.md) | List of planned improvements, UX refinements, bug fixes, and feature candidates. | When a task is completed, reprioritized, or when a new feedback item is logged. |
 
 ### 1.1. Tool & Plugin Integrations
