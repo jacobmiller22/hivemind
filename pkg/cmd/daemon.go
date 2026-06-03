@@ -19,12 +19,12 @@ func Daemon(ctx context.Context, args []string) error {
 	l := clog.FromContext(ctx)
 	cfg := config.LoadConfig(args)
 
-	l.Debug(logkeys.CommandStart, logkeys.Command, "HIVEMIND_DAEMON", logkeys.Config, cfg)
+	l.DebugContext(ctx, logkeys.CommandStart, logkeys.Command, "HIVEMIND_DAEMON", logkeys.Config, cfg)
 
 	s := daemon.NewServer()
 	s.SocketPath = cfg.SocketPath
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// Handle graceful shutdown signals

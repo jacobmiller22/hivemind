@@ -20,7 +20,7 @@ func Config(ctx context.Context, args []string) error {
 	l := clog.FromContext(ctx)
 	cfg := config.LoadConfig(args)
 
-	l.Debug(logkeys.CommandStart, logkeys.Command, "HMCONFIG", logkeys.Config, cfg)
+	l.DebugContext(ctx, logkeys.CommandStart, logkeys.Command, "HMCONFIG", logkeys.Config, cfg)
 
 	return fmt.Errorf(hmConfigUsage)
 }

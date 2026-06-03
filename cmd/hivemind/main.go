@@ -62,8 +62,13 @@ func main() {
 	target, targetArgs := hivemind.Search(os.Args)
 
 	if target == nil {
-		l.ErrorContext(ctx, "target not found", "usage", usage, "target", target, "targetArgs", targetArgs)
-		os.Exit(1)
+		if len(os.Args) > 1 && len(os.Args[1]) > 0 && os.Args[1][0] == '-' {
+			target = hivemind
+			targetArgs = os.Args[1:]
+		} else {
+			l.ErrorContext(ctx, "target not found", "usage", usage, "target", target, "targetArgs", targetArgs)
+			os.Exit(1)
+		}
 	}
 
 	if err := target.Entrypoint(ctx, targetArgs); err != nil {

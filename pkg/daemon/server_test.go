@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -28,7 +29,7 @@ func TestEventProcessing(t *testing.T) {
 			Model:  "Gemini 1.5 Pro",
 		},
 	}
-	s.processEvent(startedEvent)
+	s.processEvent(context.Background(), startedEvent)
 
 	state := s.GetState()
 	sess, exists := state.Sessions["session_1"]
@@ -57,7 +58,7 @@ func TestEventProcessing(t *testing.T) {
 			Status: StatusThinking,
 		},
 	}
-	s.processEvent(statusEvent)
+	s.processEvent(context.Background(), statusEvent)
 	if sess.Status != StatusThinking {
 		t.Errorf("expected status thinking, got %s", sess.Status)
 	}
@@ -76,7 +77,7 @@ func TestEventProcessing(t *testing.T) {
 			},
 		},
 	}
-	s.processEvent(spawnEvent)
+	s.processEvent(context.Background(), spawnEvent)
 	sa, saExists := sess.Subagents["sub_1"]
 	if !saExists {
 		t.Fatal("subagent sub_1 was not spawned")
@@ -100,7 +101,7 @@ func TestEventProcessing(t *testing.T) {
 			},
 		},
 	}
-	s.processEvent(saStatusEvent)
+	s.processEvent(context.Background(), saStatusEvent)
 	if sa.Status != SubagentCompleted {
 		t.Errorf("expected subagent status completed, got %s", sa.Status)
 	}
@@ -114,7 +115,7 @@ func TestEventProcessing(t *testing.T) {
 		EventType: "session_stopped",
 		Timestamp: time.Now(),
 	}
-	s.processEvent(stopEvent)
+	s.processEvent(context.Background(), stopEvent)
 	if sess.Status != StatusCompleted {
 		t.Errorf("expected session status completed, got %s", sess.Status)
 	}
@@ -150,8 +151,8 @@ func TestTmuxSyncAndPruning(t *testing.T) {
 		Context:   EventContext{TmuxPaneId: "%2"},
 		Payload:   EventPayload{Status: StatusIdle},
 	}
-	s.processEvent(startedEvent1)
-	s.processEvent(startedEvent2)
+	s.processEvent(context.Background(), startedEvent1)
+	s.processEvent(context.Background(), startedEvent2)
 
 	// Spawn a subagent in session_1
 	spawnEvent := &HivemindEvent{
@@ -165,7 +166,7 @@ func TestTmuxSyncAndPruning(t *testing.T) {
 			},
 		},
 	}
-	s.processEvent(spawnEvent)
+	s.processEvent(context.Background(), spawnEvent)
 
 	// Verify both sessions and subagent exist
 	state := s.GetState()
@@ -177,7 +178,7 @@ func TestTmuxSyncAndPruning(t *testing.T) {
 	}
 
 	// 1. Run sync when panes are still active: no changes
-	s.SyncTmuxAndPrune()
+	s.SyncTmuxAndPrune(context.Background())
 	state = s.GetState()
 	if len(state.Sessions) != 2 {
 		t.Errorf("expected 2 sessions after sync, got %d", len(state.Sessions))
@@ -185,7 +186,7 @@ func TestTmuxSyncAndPruning(t *testing.T) {
 
 	// 2. Remove %2 from active panes: session_2 should mark as exited/completed
 	mockPanes = []string{"%1"}
-	s.SyncTmuxAndPrune()
+	s.SyncTmuxAndPrune(context.Background())
 	state = s.GetState()
 	sess2 := state.Sessions["session_2"]
 	if sess2 == nil {
@@ -200,7 +201,7 @@ func TestTmuxSyncAndPruning(t *testing.T) {
 
 	// 3. Wait for cool-off, then run sync again: session_2 and sub_1 should be pruned
 	time.Sleep(80 * time.Millisecond)
-	s.SyncTmuxAndPrune()
+	s.SyncTmuxAndPrune(context.Background())
 	state = s.GetState()
 
 	if _, exists := state.Sessions["session_2"]; exists {

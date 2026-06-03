@@ -21,7 +21,7 @@ func Event(ctx context.Context, args []string) error {
 	l := clog.FromContext(ctx)
 	cfg := config.LoadConfig(args)
 
-	l.Debug(logkeys.CommandStart, logkeys.Command, "HIVEMIND_EVENT", logkeys.Config, cfg)
+	l.DebugContext(ctx, logkeys.CommandStart, logkeys.Command, "HIVEMIND_EVENT", logkeys.Config, cfg)
 
 	if len(args) < 2 {
 		err := fmt.Errorf("missing plugin or event name. Usage: hivemind event <plugin> <event>")

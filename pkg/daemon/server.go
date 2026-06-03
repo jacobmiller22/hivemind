@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jacobmiller22/gossentials/clog"
 )
 
 var conversationIDRegex = regexp.MustCompile(`(?i)"conversationId"\s*:\s*"([a-fA-F0-9\-]+)"`)
@@ -68,7 +69,7 @@ func DefaultListPanes() ([]string, error) {
 }
 
 // ListenUDS sets up the Unix Domain Socket listener.
-func ListenUDS(socketPath string) (net.Listener, string, error) {
+func ListenUDS(ctx context.Context, socketPath string) (net.Listener, string, error) {
 	resolvedPath := ResolveSocketPath(socketPath)
 
 	// Attempt to create the parent directories
@@ -80,7 +81,7 @@ func ListenUDS(socketPath string) (net.Listener, string, error) {
 	// Remove existing socket file if it exists
 	_ = os.Remove(resolvedPath)
 
-	log.Printf("Listening on socket at %s", resolvedPath)
+	clog.FromContext(ctx).InfoContext(ctx, "Listening on socket", "path", resolvedPath)
 	l, err := net.Listen("unix", resolvedPath)
 	if err != nil {
 		return nil, "", err
@@ -109,7 +110,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.SocketPath = "~/.config/hivemind/hivemind.sock"
 	}
 
-	l, resolvedPath, err := ListenUDS(s.SocketPath)
+	l, resolvedPath, err := ListenUDS(ctx, s.SocketPath)
 	if err != nil {
 		return err
 	}
@@ -133,15 +134,16 @@ func (s *Server) Start(ctx context.Context) error {
 				return err
 			}
 		}
-		go s.HandleConnection(conn)
+		go s.HandleConnection(ctx, conn)
 	}
 }
 
 // HandleConnection handles a single client or hook adapter connection.
-func (s *Server) HandleConnection(conn net.Conn) {
-	log.Printf("[DEBUG] HandleConnection: Accepted new connection from %v\n", conn.RemoteAddr())
+func (s *Server) HandleConnection(ctx context.Context, conn net.Conn) {
+	l := clog.FromContext(ctx)
+	l.DebugContext(ctx, "HandleConnection: Accepted new connection", "remote", conn.RemoteAddr())
 	defer func() {
-		log.Printf("[DEBUG] HandleConnection: Closing connection from %v\n", conn.RemoteAddr())
+		l.DebugContext(ctx, "HandleConnection: Closing connection", "remote", conn.RemoteAddr())
 		conn.Close()
 	}()
 	scanner := bufio.NewScanner(conn)
@@ -151,7 +153,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 
 	defer func() {
 		if isSubscriber {
-			log.Printf("[DEBUG] HandleConnection: Unsubscribing client %v\n", conn.RemoteAddr())
+			l.DebugContext(ctx, "HandleConnection: Unsubscribing client", "remote", conn.RemoteAddr())
 			s.SubscribersMu.Lock()
 			delete(s.Subscribers, subChan)
 			s.SubscribersMu.Unlock()
@@ -164,7 +166,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 			continue
 		}
 
-		log.Printf("[DEBUG] HandleConnection: Received payload: %s\n", string(line))
+		l.DebugContext(ctx, "HandleConnection: Received payload", "payload", string(line))
 
 		// Check if it's a subscribe request or a telemetry event
 		var msg struct {
@@ -172,12 +174,12 @@ func (s *Server) HandleConnection(conn net.Conn) {
 			SessionID string `json:"sessionId"`
 		}
 		if err := json.Unmarshal(line, &msg); err != nil {
-			log.Printf("[DEBUG] HandleConnection: JSON unmarshal error (preliminary check): %v\n", err)
+			l.DebugContext(ctx, "HandleConnection: JSON unmarshal error (preliminary check)", "error", err)
 			continue
 		}
 
 		if msg.Type == "subscribe" {
-			log.Printf("[DEBUG] HandleConnection: Client subscribing from %v\n", conn.RemoteAddr())
+			l.DebugContext(ctx, "HandleConnection: Client subscribing", "remote", conn.RemoteAddr())
 			isSubscriber = true
 			subChan = make(chan []byte, 100)
 
@@ -198,7 +200,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 				for data := range subChan {
 					_, err := conn.Write(append(data, '\n'))
 					if err != nil {
-						log.Printf("[DEBUG] HandleConnection: Subscription write error for %v: %v\n", conn.RemoteAddr(), err)
+						l.DebugContext(ctx, "HandleConnection: Subscription write error", "remote", conn.RemoteAddr(), "error", err)
 						_ = conn.Close()
 						return
 					}
@@ -211,23 +213,24 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		// Otherwise, process as a HivemindEvent
 		var event HivemindEvent
 		if err := json.Unmarshal(line, &event); err != nil {
-			log.Printf("[DEBUG] HandleConnection: JSON unmarshal error (HivemindEvent): %v\n", err)
+			l.DebugContext(ctx, "HandleConnection: JSON unmarshal error (HivemindEvent)", "error", err)
 			continue
 		}
 
-		log.Printf("[DEBUG] HandleConnection: Processing event type %q, sessionId %q, eventType %q\n", event.Type, event.SessionID, event.EventType)
-		s.processEvent(&event)
+		l.DebugContext(ctx, "HandleConnection: Processing event", "type", event.Type, "sessionId", event.SessionID, "eventType", event.EventType)
+		s.processEvent(ctx, &event)
 	}
 }
 
 // processEvent applies a lifecycle event to the session state tree.
-func (s *Server) processEvent(event *HivemindEvent) {
-	log.Printf("[DEBUG] processEvent: SessionID=%q, EventType=%q, Status=%q\n", event.SessionID, event.EventType, event.Payload.Status)
+func (s *Server) processEvent(ctx context.Context, event *HivemindEvent) {
+	l := clog.FromContext(ctx)
+	l.DebugContext(ctx, "processEvent", "sessionId", event.SessionID, "eventType", event.EventType, "status", event.Payload.Status)
 	s.StateMu.Lock()
 	defer s.StateMu.Unlock()
 
 	if event.SessionID == "" {
-		log.Printf("[DEBUG] processEvent: SessionID is empty, skipping\n")
+		l.DebugContext(ctx, "processEvent: SessionID is empty, skipping")
 		return
 	}
 
@@ -334,7 +337,7 @@ func (s *Server) processEvent(event *HivemindEvent) {
 		session.PaneExitedAt = &now
 	}
 
-	s.broadcastStateLocked()
+	s.broadcastStateLocked(ctx)
 }
 
 // StartTicker runs the periodic tmux pane checker.
@@ -347,13 +350,13 @@ func (s *Server) StartTicker(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.SyncTmuxAndPrune()
+			s.SyncTmuxAndPrune(ctx)
 		}
 	}
 }
 
 // SyncTmuxAndPrune polls tmux, marks stale panes as completed, and handles session and subagent cool-offs.
-func (s *Server) SyncTmuxAndPrune() {
+func (s *Server) SyncTmuxAndPrune(ctx context.Context) {
 	s.StateMu.Lock()
 	defer s.StateMu.Unlock()
 
@@ -417,18 +420,18 @@ func (s *Server) SyncTmuxAndPrune() {
 	}
 
 	if stateChanged {
-		s.broadcastStateLocked()
+		s.broadcastStateLocked(ctx)
 	}
 }
 
 // broadcastStateLocked serializes and streams the updated StateTree to all open subscribers.
-func (s *Server) broadcastStateLocked() {
+func (s *Server) broadcastStateLocked(ctx context.Context) {
 	stateJSON, err := json.Marshal(s.State)
 	if err != nil {
 		return
 	}
 
-	log.Printf("[DEBUG] broadcastStateLocked: Broadcasting state to %d active subscribers\n", len(s.Subscribers))
+	clog.FromContext(ctx).DebugContext(ctx, "broadcastStateLocked: Broadcasting state", "subscribers", len(s.Subscribers))
 
 	s.SubscribersMu.Lock()
 	defer s.SubscribersMu.Unlock()
@@ -462,15 +465,15 @@ func (s *Server) Close() error {
 }
 
 // BroadcastState serializes and streams the updated StateTree to all open subscribers.
-func (s *Server) BroadcastState() {
+func (s *Server) BroadcastState(ctx context.Context) {
 	s.StateMu.Lock()
 	defer s.StateMu.Unlock()
-	s.broadcastStateLocked()
+	s.broadcastStateLocked(ctx)
 }
 
 // Emit injects an externally generated HivemindEvent into the state engine.
-func (s *Server) Emit(event *HivemindEvent) {
-	s.processEvent(event)
+func (s *Server) Emit(ctx context.Context, event *HivemindEvent) {
+	s.processEvent(ctx, event)
 }
 
 func SubagentsEqual(a, b map[string]*Subagent) bool {
