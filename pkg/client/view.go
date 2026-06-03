@@ -166,7 +166,9 @@ func (m *Model) View() string {
 	if width >= 90 {
 		// Side-by-side layout
 		inspectorWidth := 34
-		treeWidth := width - inspectorWidth - 6
+		// Adjust treeWidth to account for inspector's left border (1) and left padding (2),
+		// fitting exactly inside the mainLayout's content area (which is width - 12).
+		treeWidth := width - inspectorWidth - 13
 		
 		inspectorContent := m.renderInspector(inspectorWidth, bodyHeight)
 		
@@ -182,7 +184,8 @@ func (m *Model) View() string {
 		)
 	} else {
 		// Stacked or tree-only layout
-		body = treeContent
+		// Wrap treeContent to the mainLayout content width (width - 12) to prevent wrapping glitches.
+		body = lipgloss.NewStyle().Width(width - 12).Render(treeContent)
 	}
 
 	viewBuilder.WriteString(mainLayout.Width(width - 6).Render(body))
