@@ -114,7 +114,7 @@ func killExistingDaemon(ctx context.Context, daemonPidFilePath string) {
 		if _, err := fmt.Sscanf(string(data), "%d", &pid); err == nil {
 			proc, err := os.FindProcess(pid)
 			if err == nil {
-				l.InfoContext(ctx, "Stopping existing daemon (PID %d)...\n", pid)
+				l.InfoContext(ctx, "Stopping existing daemon", "pid", pid)
 				// Send SIGTERM
 				_ = proc.Signal(syscall.SIGTERM)
 

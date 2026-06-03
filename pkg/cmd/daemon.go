@@ -12,7 +12,6 @@ import (
 	"github.com/jacobmiller22/hivemind/pkg/client"
 	"github.com/jacobmiller22/hivemind/pkg/config"
 	"github.com/jacobmiller22/hivemind/pkg/daemon"
-	"github.com/jacobmiller22/hivemind/pkg/daemon/adapters"
 	"github.com/jacobmiller22/hivemind/pkg/logkeys"
 )
 
@@ -23,9 +22,7 @@ func Daemon(ctx context.Context, args []string) error {
 	l.Debug(logkeys.CommandStart, logkeys.Command, "HIVEMIND_DAEMON", logkeys.Config, cfg)
 
 	s := daemon.NewServer()
-
-	// For now, manually control enabled adapters
-	s.Adapters = append(s.Adapters, adapters.NewGenericUDSAdapter(cfg.SocketPath))
+	s.SocketPath = cfg.SocketPath
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

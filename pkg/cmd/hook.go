@@ -69,7 +69,7 @@ func HookAntigravity20(ctx context.Context, args []string) error {
 				{
 					Matcher: "*",
 					Hooks: []HookConfig{
-						{Command: fmt.Sprintf("%s event PreToolUse", selfPath)},
+						{Command: fmt.Sprintf("%s event antigravity PreToolUse", selfPath)},
 					},
 				},
 			},
@@ -77,18 +77,18 @@ func HookAntigravity20(ctx context.Context, args []string) error {
 				{
 					Matcher: "*",
 					Hooks: []HookConfig{
-						{Command: fmt.Sprintf("%s event PostToolUse", selfPath)},
+						{Command: fmt.Sprintf("%s event antigravity PostToolUse", selfPath)},
 					},
 				},
 			},
 			PreInvocation: []HookConfig{
-				{Command: fmt.Sprintf("%s event PreInvocation", selfPath)},
+				{Command: fmt.Sprintf("%s event antigravity PreInvocation", selfPath)},
 			},
 			PostInvocation: []HookConfig{
-				{Command: fmt.Sprintf("%s event PostInvocation", selfPath)},
+				{Command: fmt.Sprintf("%s event antigravity PostInvocation", selfPath)},
 			},
 			Stop: []HookConfig{
-				{Command: fmt.Sprintf("%s event Stop", selfPath)},
+				{Command: fmt.Sprintf("%s event antigravity Stop", selfPath)},
 			},
 		},
 	}

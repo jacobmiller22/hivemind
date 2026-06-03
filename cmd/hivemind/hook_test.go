@@ -1,11 +1,15 @@
-package main
+package main_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"testing"
+
+	"github.com/jacobmiller22/hivemind/pkg/cmd"
+	"github.com/jacobmiller22/hivemind/pkg/plugins/antigravity"
 )
 
 func TestHookPreToolUse_Allow(t *testing.T) {
@@ -24,15 +28,9 @@ func TestHookPreToolUse_Allow(t *testing.T) {
 	}
 	os.Stdin = rIn
 
-	// Set CLI flag args for subcommand "hook PreToolUse"
-	// We override os.Args to simulate "hivemind hook PreToolUse"
-	oldArgs := os.Args
-	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"hivemind", "hook", "PreToolUse"}
-
-	payload := AntigravityInput{
+	payload := antigravity.AntigravityInput{
 		ConversationID: "test-conv-123",
-		ToolCall: &AntigravityToolCall{
+		ToolCall: &antigravity.AntigravityToolCall{
 			Name: "view_file",
 			Args: map[string]interface{}{"AbsolutePath": "/test.txt"},
 		},
@@ -51,8 +49,9 @@ func TestHookPreToolUse_Allow(t *testing.T) {
 	}
 	os.Stdout = wOut
 
-	// 3. Run hook logic with mock socket
-	runHook("/tmp/test_hivemind_telemetry.sock", "PreToolUse")
+	// 3. Run event subcommand with mock socket
+	ctx := context.Background()
+	_ = cmd.Event(ctx, []string{"antigravity", "PreToolUse"})
 
 	_ = wOut.Close()
 
@@ -82,11 +81,7 @@ func TestHookPostToolUse(t *testing.T) {
 	rIn, wIn, _ := os.Pipe()
 	os.Stdin = rIn
 
-	oldArgs := os.Args
-	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"hivemind", "hook", "PostToolUse"}
-
-	payload := AntigravityInput{
+	payload := antigravity.AntigravityInput{
 		ConversationID: "test-conv-123",
 		StepIdx:        5,
 		Error:          "command failed",
@@ -101,7 +96,8 @@ func TestHookPostToolUse(t *testing.T) {
 	rOut, wOut, _ := os.Pipe()
 	os.Stdout = wOut
 
-	runHook("/tmp/test_hivemind_telemetry.sock", "PostToolUse")
+	ctx := context.Background()
+	_ = cmd.Event(ctx, []string{"antigravity", "PostToolUse"})
 
 	_ = wOut.Close()
 
@@ -130,11 +126,7 @@ func TestHookPreInvocation(t *testing.T) {
 	rIn, wIn, _ := os.Pipe()
 	os.Stdin = rIn
 
-	oldArgs := os.Args
-	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"hivemind", "hook", "PreInvocation"}
-
-	payload := AntigravityInput{
+	payload := antigravity.AntigravityInput{
 		ConversationID:  "test-conv-123",
 		InvocationNum:   2,
 		InitialNumSteps: 12,
@@ -149,7 +141,8 @@ func TestHookPreInvocation(t *testing.T) {
 	rOut, wOut, _ := os.Pipe()
 	os.Stdout = wOut
 
-	runHook("/tmp/test_hivemind_telemetry.sock", "PreInvocation")
+	ctx := context.Background()
+	_ = cmd.Event(ctx, []string{"antigravity", "PreInvocation"})
 
 	_ = wOut.Close()
 
@@ -182,11 +175,7 @@ func TestHookStop(t *testing.T) {
 	rIn, wIn, _ := os.Pipe()
 	os.Stdin = rIn
 
-	oldArgs := os.Args
-	defer func() { os.Args = oldArgs }()
-	os.Args = []string{"hivemind", "hook", "Stop"}
-
-	payload := AntigravityInput{
+	payload := antigravity.AntigravityInput{
 		ConversationID:    "test-conv-123",
 		FullyIdle:         true,
 		TerminationReason: "model_stop",
@@ -201,7 +190,8 @@ func TestHookStop(t *testing.T) {
 	rOut, wOut, _ := os.Pipe()
 	os.Stdout = wOut
 
-	runHook("/tmp/test_hivemind_telemetry.sock", "Stop")
+	ctx := context.Background()
+	_ = cmd.Event(ctx, []string{"antigravity", "Stop"})
 
 	_ = wOut.Close()
 

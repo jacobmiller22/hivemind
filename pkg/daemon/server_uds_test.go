@@ -5,21 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jacobmiller22/hivemind/pkg/daemon"
-	"github.com/jacobmiller22/hivemind/pkg/daemon/adapters"
 )
 
-// TestMultiClientBroadcasting verifies multi-client subscriptions and state tree event broadcasts.
+// TestMultiClientBroadcasting verifies multi-client subscriptions and state tree event broadcasts using the native UDS server.
 func TestMultiClientBroadcasting(t *testing.T) {
 	socketPath := "/tmp/hivemind_test_main.sock"
 
 	s := daemon.NewServer()
-	s.Adapters = []daemon.ToolAdapter{adapters.NewGenericUDSAdapter(socketPath)}
+	s.SocketPath = socketPath
 	s.ListPanesFunc = func() ([]string, error) {
 		return []string{"%1"}, nil
 	}
@@ -35,8 +32,10 @@ func TestMultiClientBroadcasting(t *testing.T) {
 	// Wait for the socket to initialize
 	time.Sleep(50 * time.Millisecond)
 
+	resolvedSocketPath := daemon.ResolveSocketPath(socketPath)
+
 	// Connect Client 1
-	conn1, err := net.Dial("unix", adapters.ResolveSocketPath(socketPath))
+	conn1, err := net.Dial("unix", resolvedSocketPath)
 	if err != nil {
 		t.Fatalf("failed to dial socket: %v", err)
 	}
@@ -64,7 +63,7 @@ func TestMultiClientBroadcasting(t *testing.T) {
 	}
 
 	// Connect Client 2
-	conn2, err := net.Dial("unix", adapters.ResolveSocketPath(socketPath))
+	conn2, err := net.Dial("unix", resolvedSocketPath)
 	if err != nil {
 		t.Fatalf("failed to dial socket for client 2: %v", err)
 	}
@@ -88,7 +87,7 @@ func TestMultiClientBroadcasting(t *testing.T) {
 	}
 
 	// Connect a hook adapter and write a session_started event
-	hookConn, err := net.Dial("unix", adapters.ResolveSocketPath(socketPath))
+	hookConn, err := net.Dial("unix", resolvedSocketPath)
 	if err != nil {
 		t.Fatalf("failed to dial socket for hook: %v", err)
 	}
@@ -141,58 +140,4 @@ func TestMultiClientBroadcasting(t *testing.T) {
 
 	cancel()
 	_ = <-errChan
-}
-
-// TestParseTranscriptFileSubagents verifies that parseTranscriptFile correctly parses both raw and double-escaped subagents arguments,
-// extracts the conversationId from INVOKE_SUBAGENT done step content, and correctly links/marks the subagent.
-func TestParseTranscriptFileSubagents(t *testing.T) {
-	tmpDir := t.TempDir()
-	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
-
-	lines := []string{
-		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Hello"}`,
-		// Step 1: PLANNER_RESPONSE with double-escaped subagents string inside args
-		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"invoke_subagent","args":{"Subagents":"[{\"Role\":\"Code Analyst\",\"TypeName\":\"research\"}]"}}]}`,
-		// Step 2: INVOKE_SUBAGENT with conversationId in content
-		`{"step_index":2,"source":"MODEL","type":"INVOKE_SUBAGENT","status":"DONE","content":"Created the following subagents:\n{\n  \"conversationId\": \"9c036cf3-623e-4f36-9700-68577dfc9226\"\n}"}`,
-	}
-
-	f, err := os.Create(transcriptPath)
-	if err != nil {
-		t.Fatalf("failed to create transcript file: %v", err)
-	}
-	for _, l := range lines {
-		if _, err := f.WriteString(l + "\n"); err != nil {
-			t.Fatalf("failed to write line: %v", err)
-		}
-	}
-	f.Close()
-
-	adapter := adapters.NewAntigravityAdapter("", 1*time.Second)
-	fss, err := adapter.ParseTranscriptFile(transcriptPath, "parent_session_1")
-	if err != nil {
-		t.Fatalf("failed to parse transcript file: %v", err)
-	}
-
-	if len(fss.Subagents) != 1 {
-		t.Fatalf("expected 1 subagent, got %d", len(fss.Subagents))
-	}
-
-	sa, ok := fss.Subagents["9c036cf3-623e-4f36-9700-68577dfc9226"]
-	if !ok {
-		t.Fatalf("expected subagent to be linked with ID '9c036cf3-623e-4f36-9700-68577dfc9226', but it is missing. Subagents: %+v", fss.Subagents)
-	}
-
-	if sa.Role != "Code Analyst" {
-		t.Errorf("expected role 'Code Analyst', got '%s'", sa.Role)
-	}
-	if sa.TypeName != "research" {
-		t.Errorf("expected type 'research', got '%s'", sa.TypeName)
-	}
-	if sa.Status != daemon.SubagentCompleted {
-		t.Errorf("expected status 'completed', got '%s'", sa.Status)
-	}
-	if sa.CompletedAt == nil {
-		t.Error("expected CompletedAt to be set, but it was nil")
-	}
 }

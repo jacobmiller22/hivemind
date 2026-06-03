@@ -181,6 +181,10 @@ func newDefaultFlagConfigurer(args []string) *omniconfig.FlagConfigurer[Config] 
 	flagset.StringVar(&cfg.ConfigPath, "config", DefaultConfigPath(), "Path to configuration file. Uses default if not provided.")
 	flagset.StringVar(&cfg.Log.Level, "log-level", "", "Log level to use")
 	flagset.StringVar(&cfg.Log.File, "log-file", "", "Log file to use")
+	flagset.StringVar(&cfg.SocketPath, "uds", "", "Custom path to the Unix Domain Socket")
+	flagset.StringVar(&cfg.AntigravityCliConfig.BrainPath, "antigravity-dir", "", "Custom path to search for Antigravity transcript files")
+	flagset.DurationVar(&cfg.Server.FilePollPeriod, "file-poll", 0, "Polling interval for file adapters")
+	flagset.BoolVar(&cfg.RestartDaemon, "restart", false, "Restart the background daemon if it is already running")
 
 	return omniconfig.NewFlagConfigurer(
 		flagset,

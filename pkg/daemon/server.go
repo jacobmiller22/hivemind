@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"log"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,15 +24,15 @@ type Server struct {
 	Subscribers   map[chan []byte]bool
 	SubscribersMu sync.Mutex
 
-	// New Tool Adapter Fields
-	Adapters []ToolAdapter
-
 	// Configuration for cool-off windows
 	SubagentCoolOff time.Duration
 	SessionCoolOff  time.Duration
 
 	// Pluggable tmux poller function for easy testing
 	ListPanesFunc func() ([]string, error)
+
+	// Custom path to the Unix Domain Socket
+	SocketPath string
 }
 
 // NewServer initializes a new Server with default settings.
@@ -65,20 +67,74 @@ func DefaultListPanes() ([]string, error) {
 	return panes, nil
 }
 
+// ListenUDS sets up the Unix Domain Socket listener.
+func ListenUDS(socketPath string) (net.Listener, string, error) {
+	resolvedPath := ResolveSocketPath(socketPath)
+
+	// Attempt to create the parent directories
+	dir := filepath.Dir(resolvedPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, "", err
+	}
+
+	// Remove existing socket file if it exists
+	_ = os.Remove(resolvedPath)
+
+	log.Printf("Listening on socket at %s", resolvedPath)
+	l, err := net.Listen("unix", resolvedPath)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return l, resolvedPath, nil
+}
+
+// ResolveSocketPath expands the home directory tilde if present.
+func ResolveSocketPath(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
 // Start runs the server's main UDS acceptance loop and the tmux polling ticker.
 func (s *Server) Start(ctx context.Context) error {
 	// Start background tmux polling and pruning routine
 	go s.StartTicker(ctx, 2*time.Second)
 
-	// Start each registered adapter in its own goroutine
-	for _, adapter := range s.Adapters {
-		go func(a ToolAdapter) {
-			_ = a.Start(ctx, s)
-		}(adapter)
+	if s.SocketPath == "" {
+		s.SocketPath = "~/.config/hivemind/hivemind.sock"
 	}
 
-	<-ctx.Done()
-	return nil
+	l, resolvedPath, err := ListenUDS(s.SocketPath)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	defer func() {
+		_ = os.Remove(resolvedPath)
+	}()
+
+	go func() {
+		<-ctx.Done()
+		_ = l.Close()
+	}()
+
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				return err
+			}
+		}
+		go s.HandleConnection(conn)
+	}
 }
 
 // HandleConnection handles a single client or hook adapter connection.
